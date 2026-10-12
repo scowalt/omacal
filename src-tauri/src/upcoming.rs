@@ -136,8 +136,8 @@ pub struct FeedEvent {
     /// Exclusive, as everywhere else in this codebase.
     pub end_ms: i64,
     pub all_day: bool,
-    /// The owning calendar's IANA zone — what an all-day entry's midnight was
-    /// resolved against, and the zone a reader should bucket days in.
+    /// The zone a reader should recover all-day dates in: the calendar's for
+    /// native date-only events, the authored event's for whole-day OOO.
     pub tz: String,
     pub location: Option<String>,
     /// Invitees on the event, the organizer's row included. `0` means a solo
@@ -284,6 +284,7 @@ pub(crate) fn conference_join_url(location: Option<&str>, description: Option<&s
 /// occurrences expanded against the same window. The window starts at
 /// `now_ms`, and `occurrences` keeps anything whose end is still ahead, which
 /// is exactly how a meeting in progress stays in the feed until it is over.
+#[cfg(test)]
 pub(crate) fn assemble(
     stored: &[StoredEvent],
     calendar_names: &HashMap<i64, String>,
@@ -292,11 +293,12 @@ pub(crate) fn assemble(
     assemble_window(stored, calendar_names, now_ms, now_ms.saturating_add(HORIZON_MS), CAP)
 }
 
+#[cfg(test)]
 fn assemble_window(stored: &[StoredEvent], calendar_names: &HashMap<i64, String>, now_ms: i64, to_ms: i64, cap: usize) -> Feed {
-    assemble_window_combining(stored, calendar_names, now_ms, to_ms, cap, false)
+    assemble_window_combining(stored, calendar_names, now_ms, to_ms, cap, false, "UTC")
 }
 
-fn assemble_window_combining(stored: &[StoredEvent], calendar_names: &HashMap<i64, String>, now_ms: i64, to_ms: i64, cap: usize, combine: bool) -> Feed {
+fn assemble_window_combining(stored: &[StoredEvent], calendar_names: &HashMap<i64, String>, now_ms: i64, to_ms: i64, cap: usize, combine: bool, viewing_tz: &str) -> Feed {
     let suppressed = crate::commands::suppressed_slots(stored);
 
     let mut events = Vec::new();
@@ -308,18 +310,19 @@ fn assemble_window_combining(stored: &[StoredEvent], calendar_names: &HashMap<i6
         if src.self_response.as_deref() == Some("declined") {
             continue;
         }
-        for iv in crate::commands::occurrences(src, now_ms, to_ms) {
+        for iv in crate::commands::display_occurrences(src, now_ms, to_ms, viewing_tz) {
             if suppressed.contains(&(src.calendar_id, src.google_id.as_str(), iv.start_ms)) {
                 continue;
             }
             if combine { display_events.push(crate::commands::to_ui(src, iv.start_ms, iv.end_ms)); }
+            let shown = src.presentation(iv);
             events.push(FeedEvent {
                 colors: Vec::new(),
                 title: src.summary.clone(),
                 start_ms: iv.start_ms,
                 end_ms: iv.end_ms,
-                all_day: src.is_all_day,
-                tz: src.calendar_timezone.clone(),
+                all_day: shown.is_all_day(),
+                tz: shown.timezone().unwrap_or(&src.calendar_timezone).to_string(),
                 location: src.location.clone(),
                 attendees: src.attendees.len() as u32,
                 response: src.self_response.clone(),
@@ -467,8 +470,13 @@ pub(crate) const AGENDA_LOOKAHEAD_DAYS: usize = 7;
 pub(crate) const PER_DAY_CAP: u32 = 6;
 
 pub(crate) async fn current(pool: &SqlitePool, now_ms: i64) -> anyhow::Result<Feed> {
-    let stored =
-        omacal_store::events_in_window(pool, now_ms, now_ms.saturating_add(HORIZON_MS)).await?;
+    current_in_zone(pool, now_ms, jiff::tz::TimeZone::system()).await
+}
+
+async fn current_in_zone(pool: &SqlitePool, now_ms: i64, tz: jiff::tz::TimeZone) -> anyhow::Result<Feed> {
+    const PAD: i64 = 2 * 86_400_000;
+    let viewing_tz = tz.iana_name().unwrap_or("UTC");
+    let stored = omacal_store::events_in_window(pool, now_ms.saturating_sub(PAD), now_ms.saturating_add(HORIZON_MS).saturating_add(PAD)).await?;
     let names: HashMap<i64, String> = omacal_store::list_calendars(pool)
         .await?
         .into_iter()
@@ -476,20 +484,18 @@ pub(crate) async fn current(pool: &SqlitePool, now_ms: i64) -> anyhow::Result<Fe
         .collect();
     let settings = crate::settings::read_settings(pool).await;
     let combine = settings.combine_identical_events;
-    let mut feed = if combine { assemble_window_combining(&stored, &names, now_ms, now_ms.saturating_add(HORIZON_MS), CAP, true) }
-        else { assemble(&stored, &names, now_ms) };
+    let mut feed = assemble_window_combining(&stored, &names, now_ms, now_ms.saturating_add(HORIZON_MS), CAP, combine, viewing_tz);
     // Tasks ride the same snapshot: overdue-or-imminent only, and a store
     // without a single CalDAV account contributes an empty list for free.
     let task_rows = omacal_store::tasks_for_ui(pool, now_ms).await?;
-    feed.tasks = assemble_tasks(&task_rows, now_ms, &jiff::tz::TimeZone::system());
-    let tz = jiff::tz::TimeZone::system();
+    feed.tasks = assemble_tasks(&task_rows, now_ms, &tz);
     let today = jiff::Timestamp::from_millisecond(now_ms)?.to_zoned(tz.clone()).date();
     let start = today.to_zoned(tz.clone())?.timestamp().as_millisecond();
     let end = today.tomorrow()?.to_zoned(tz.clone())?.timestamp().as_millisecond();
-    let day_stored = omacal_store::events_in_window(pool, start, end).await?;
+    let day_stored = omacal_store::events_in_window(pool, start.saturating_sub(PAD), end.saturating_add(PAD)).await?;
     // A day view needs completed events too, and a larger bound than the
     // glance-sized upcoming slice. Report truncation instead of hiding it.
-    let mut day = assemble_window_combining(&day_stored, &names, start, end, 201, combine);
+    let mut day = assemble_window_combining(&day_stored, &names, start, end, 201, combine, viewing_tz);
     let truncated = day.events.len() > 200;
     day.events.truncate(200);
     let mut agenda_days = Vec::new();
@@ -505,8 +511,8 @@ pub(crate) async fn current(pool: &SqlitePool, now_ms: i64) -> anyhow::Result<Fe
         let from = agenda_date.to_zoned(tz.clone())?.timestamp().as_millisecond();
         let next = agenda_date.tomorrow()?;
         let to = next.to_zoned(tz.clone())?.timestamp().as_millisecond();
-        let stored = omacal_store::events_in_window(pool, from, to).await?;
-        let mut slice = assemble_window_combining(&stored, &names, from, to, remaining + 1, combine);
+        let stored = omacal_store::events_in_window(pool, from.saturating_sub(PAD), to.saturating_add(PAD)).await?;
+        let mut slice = assemble_window_combining(&stored, &names, from, to, remaining + 1, combine, viewing_tz);
         agenda_truncated |= slice.events.len() > remaining;
         slice.events.truncate(remaining);
         remaining -= slice.events.len();
@@ -532,7 +538,7 @@ pub(crate) async fn current(pool: &SqlitePool, now_ms: i64) -> anyhow::Result<Fe
     feed.tray_icon = settings.tray_icon;
     feed.today = Some(FeedToday {
         label: crate::settings::menu_date(&settings, today),
-        day: crate::today_of_month(now_ms, &jiff::tz::TimeZone::system()),
+        day: crate::today_of_month(now_ms, &tz),
         show: settings.show_date,
     });
     Ok(feed)
@@ -595,6 +601,7 @@ mod tests {
             id: 0,
             calendar_id: 1,
             google_id: google_id.into(),
+            google_event_type: None,
             summary: Some("Standup".into()),
             location: None,
             start_utc: start,
@@ -623,6 +630,47 @@ mod tests {
 
     fn names() -> HashMap<i64, String> {
         HashMap::from([(1, "Work".to_string())])
+    }
+
+    #[tokio::test]
+    async fn ooo_feed_query_includes_a_civil_day_with_no_instant_overlap() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        sqlx::query("INSERT INTO accounts (google_sub, email, created_at) VALUES ('ooo', 'me@x.test', 0)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO calendars (account_id, google_id, summary, timezone, access_role) VALUES (1, 'me@x.test', 'Work', 'Pacific/Auckland', 'owner')")
+            .execute(&pool).await.unwrap();
+        let ms = |s: &str| s.parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        let mut ooo = event("ooo-edge", ms("2026-10-16T00:00:00+14:00"), ms("2026-10-17T00:00:00+14:00"));
+        ooo.google_event_type = Some("outOfOffice".into());
+        ooo.start_tz = "Pacific/Kiritimati".into();
+        ooo.summary = Some("OOO edge".into());
+        let ordinary = StoredEvent { google_id: "ordinary".into(), google_event_type: None, ..ooo.clone() };
+        omacal_store::upsert_event(&pool, &ooo).await.unwrap();
+        omacal_store::upsert_event(&pool, &ordinary).await.unwrap();
+        let now = ms("2026-10-16T12:00:00-12:00");
+        assert!(ooo.end_utc < ms("2026-10-16T00:00:00-12:00"), "neither source instant overlaps the viewing day");
+        let feed = current_in_zone(&pool, now, jiff::tz::TimeZone::get("Etc/GMT+12").unwrap()).await.unwrap();
+        assert_eq!(feed.events.len(), 1);
+        assert!(feed.events[0].all_day);
+        let panel = feed.panel.unwrap();
+        assert_eq!(panel.events.len(), 1);
+        assert_eq!(panel.agenda_days[0].events.len(), 1);
+        assert!(panel.agenda_days[1].events.is_empty(), "do not leak the prior authored date into tomorrow");
+    }
+
+    #[test]
+    fn ooo_feed_projects_each_occurrence_in_its_authored_zone() {
+        let ms = |s: &str| s.parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        let start = ms("2026-03-07T00:00:00-05:00");
+        let mut ooo = event("ooo", start, start + DAY);
+        ooo.google_event_type = Some("outOfOffice".into());
+        ooo.start_tz = "America/New_York".into();
+        ooo.calendar_timezone = "Pacific/Auckland".into();
+        ooo.recurrence = Some("RRULE:FREQ=DAILY;COUNT=3".into());
+        let feed = assemble(&[ooo], &names(), start);
+        assert_eq!(feed.events.iter().map(|e| e.all_day).collect::<Vec<_>>(), vec![true, false, true]);
+        assert_eq!(feed.events[0].tz, "America/New_York");
+        assert_eq!(feed.events[1].end_ms, ms("2026-03-09T01:00:00-04:00"));
     }
 
     #[test]

@@ -236,13 +236,9 @@ pub(crate) use omacal_core::zone::date_in_zone;
 /// rather than panicking, the same fallback philosophy as [`date_in_zone`],
 /// which cannot produce one anyway: it answers a real date for every input.
 pub(crate) fn all_day_span_dates(start_ms: i64, end_ms: i64, cal_tz: &str) -> (String, String) {
-    let start = date_in_zone(start_ms, cal_tz);
-    let last = date_in_zone(end_ms, cal_tz)
-        .parse::<jiff::civil::Date>()
-        .ok()
-        .and_then(|exclusive| exclusive.yesterday().ok())
-        .map_or_else(|| start.clone(), |d| d.to_string());
-    (start, last)
+    omacal_core::presentation::presentation(
+        true, None, omacal_core::Interval { start_ms, end_ms }, cal_tz, cal_tz,
+    ).inclusive_dates().expect("native all-day always has civil dates")
 }
 
 /// Where `target` lands after the same movement that takes `from` to `to`,

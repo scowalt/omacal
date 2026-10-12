@@ -363,6 +363,11 @@ pub(crate) struct Row {
     pub start: String,
     pub end: String,
     pub all_day: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_date: Option<String>,
+    /// Inclusive last civil day; timestamp `end` remains exclusive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_date: Option<String>,
     pub location: Option<String>,
     pub calendar: String,
     pub calendar_id: i64,
@@ -394,7 +399,8 @@ pub(crate) async fn rows_in_window(
     from_ms: i64,
     to_ms: i64,
 ) -> anyhow::Result<Vec<Row>> {
-    let stored = omacal_store::events_in_window(pool, from_ms, to_ms).await?;
+    const PAD: i64 = 2 * 24 * 3_600_000;
+    let stored = omacal_store::events_in_window(pool, from_ms.saturating_sub(PAD), to_ms.saturating_add(PAD)).await?;
     // Per calendar: its name for the row, and its account's address for the
     // organizer comparison — one map, one walk.
     let names: std::collections::HashMap<i64, (String, String)> =
@@ -425,10 +431,15 @@ pub(crate) async fn rows_in_window(
         if src.status == "cancelled" || src.self_response.as_deref() == Some("declined") {
             continue;
         }
-        for iv in crate::commands::occurrences(src, from_ms, to_ms) {
+        for iv in crate::commands::display_occurrences(src, from_ms, to_ms, tz.iana_name().unwrap_or("UTC")) {
             if suppressed.contains(&(src.calendar_id, src.google_id.as_str(), iv.start_ms)) {
                 continue;
             }
+            let shown = src.presentation(iv);
+            let (start_date, end_date) = match shown.inclusive_dates() {
+                Some((start, end)) => (Some(start), Some(end)),
+                None => (None, None),
+            };
             rows.push(Row {
                 event_id: src.id,
                 title: src.summary.clone().unwrap_or_else(|| "(no title)".into()),
@@ -436,7 +447,9 @@ pub(crate) async fn rows_in_window(
                 end_ms: iv.end_ms,
                 start: stamp(iv.start_ms),
                 end: stamp(iv.end_ms),
-                all_day: src.is_all_day,
+                all_day: shown.is_all_day(),
+                start_date,
+                end_date,
                 location: src.location.clone(),
                 calendar: names
                     .get(&src.calendar_id)
@@ -492,6 +505,12 @@ pub(crate) struct Detail {
     pub start: String,
     pub end: String,
     pub all_day: bool,
+    pub native_all_day: bool,
+    pub google_event_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_date: Option<String>,
     /// True for a series — and then the times above are the series anchor,
     /// not any particular occurrence; the window commands expand those.
     pub recurring: bool,
@@ -547,6 +566,11 @@ pub(crate) async fn detail_by_id(pool: &SqlitePool, id: i64) -> anyhow::Result<O
             .unwrap_or_default()
     };
 
+    let shown = ev.presentation(omacal_core::Interval { start_ms: ev.start_utc, end_ms: ev.end_utc });
+    let (start_date, end_date) = match shown.inclusive_dates() {
+        Some((start, end)) => (Some(start), Some(end)),
+        None => (None, None),
+    };
     Ok(Some(Detail {
         event_id: ev.id,
         title: ev.summary.clone().unwrap_or_else(|| "(no title)".into()),
@@ -554,7 +578,11 @@ pub(crate) async fn detail_by_id(pool: &SqlitePool, id: i64) -> anyhow::Result<O
         end_ms: ev.end_utc,
         start: stamp(ev.start_utc),
         end: stamp(ev.end_utc),
-        all_day: ev.is_all_day,
+        all_day: shown.is_all_day(),
+        native_all_day: ev.is_all_day,
+        google_event_type: ev.google_event_type.clone(),
+        start_date,
+        end_date,
         recurring: ev.recurrence.is_some() || ev.recurring_event_id.is_some(),
         location: ev.location.clone(),
         description: ev.description.clone(),
@@ -593,7 +621,8 @@ fn print_detail_human(d: &Detail) {
     let when = jiff::Timestamp::from_millisecond(d.start_ms)
         .map(|t| t.to_zoned(tz.clone()))
         .ok();
-    let day = when.as_ref().map(|z| z.strftime("%a, %b %-d").to_string()).unwrap_or_default();
+    let day = d.start_date.as_deref().and_then(civil_day_label)
+        .unwrap_or_else(|| when.as_ref().map(|z| z.strftime("%a, %b %-d").to_string()).unwrap_or_default());
     if d.all_day {
         println!("{day}  All day");
     } else {
@@ -681,6 +710,10 @@ pub(crate) fn day_start_ms(date: jiff::civil::Date) -> anyhow::Result<i64> {
         .as_millisecond())
 }
 
+fn civil_day_label(date: &str) -> Option<String> {
+    date.parse::<jiff::civil::Date>().ok().map(|d| d.strftime("%a, %b %-d").to_string())
+}
+
 fn print_rows_human(rows: &[Row]) {
     if rows.is_empty() {
         println!("Nothing scheduled.");
@@ -692,10 +725,8 @@ fn print_rows_human(rows: &[Row]) {
         let z = jiff::Timestamp::from_millisecond(r.start_ms)
             .map(|t| t.to_zoned(tz.clone()))
             .ok();
-        let day = z
-            .as_ref()
-            .map(|z| z.strftime("%a, %b %-d").to_string())
-            .unwrap_or_default();
+        let day = r.start_date.as_deref().and_then(civil_day_label)
+            .unwrap_or_else(|| z.as_ref().map(|z| z.strftime("%a, %b %-d").to_string()).unwrap_or_default());
         if day != last_day {
             println!("{day}");
             last_day = day;
@@ -1819,6 +1850,36 @@ mod tests {
     /// (expanded, not one row), a declined row (absent), and a hidden
     /// calendar's event (absent) — the same visibility the app's own views
     /// have, which is the whole contract with an agent reading this.
+    #[tokio::test]
+    async fn ooo_listing_and_show_share_civil_dates_without_changing_write_timing() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        sqlx::query("INSERT INTO accounts (google_sub, email, created_at) VALUES ('ooo','me@x.test',0)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO calendars (account_id, google_id, summary, timezone, access_role)
+                     VALUES (1, 'primary', 'Work', 'America/New_York', 'owner')")
+            .execute(&pool).await.unwrap();
+        let wire: omacal_google::model::Event = serde_json::from_value(serde_json::json!({
+            "id": "ooo-read", "summary": "OOO (🍂)", "status": "confirmed", "eventType": "outOfOffice",
+            "start": {"dateTime": "2026-10-16T00:00:00+13:00", "timeZone": "Pacific/Auckland"},
+            "end": {"dateTime": "2026-10-21T00:00:00+13:00", "timeZone": "Pacific/Auckland"}
+        })).unwrap();
+        let source = omacal_sync::to_stored(&wire, 1, "America/New_York").unwrap();
+        let id = omacal_store::upsert_event(&pool, &source).await.unwrap();
+        let rows = rows_in_window(&pool, 1791763200000, 1792713600000).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].all_day);
+        let shown = detail_by_id(&pool, id).await.unwrap().unwrap();
+        assert!(shown.all_day);
+        for json in [serde_json::to_value(&rows[0]).unwrap(), serde_json::to_value(&shown).unwrap()] {
+            assert_eq!(json["startDate"], "2026-10-16");
+            assert_eq!(json["endDate"], "2026-10-20");
+        }
+        assert_eq!(serde_json::to_value(&shown).unwrap()["nativeAllDay"], false);
+        let (saved, _, _) = omacal_store::event_by_id(&pool, id).await.unwrap().unwrap();
+        assert!(!saved.is_all_day);
+        assert_eq!((shown.start_ms, shown.end_ms), (source.start_utc, source.end_utc));
+    }
+
     #[tokio::test]
     async fn rows_expand_series_and_hide_what_the_app_hides() {
         let pool = omacal_store::connect_memory().await.unwrap();

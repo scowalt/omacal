@@ -187,6 +187,10 @@ const SAFE_EXACT: &[&str] = &[
     // §2 is about. `a_guest_list_conflict_reaches_the_user_verbatim` pins the
     // pair, so a reworded constant fails a test rather than going opaque.
     crate::events::CONFLICT_GUESTS,
+    // events::validate_ooo_edit, before any unsafe OOO write. Fixed benign
+    // literals; update_event_body propagates with no added context.
+    crate::events::OOO_DATE_ONLY,
+    crate::events::OOO_FOLLOWING,
     // src-tauri/src/events.rs — `split_series`' refusal to split a series that
     // ends after a fixed number of occurrences. Fixed literal, no
     // interpolation, raised with `bail!` before either write and propagated by
@@ -556,6 +560,8 @@ mod tests {
             "the new series was created but the original could not be shortened — \
              you now have two overlapping series and should delete one",
             crate::events::CONFLICT_GUESTS,
+            crate::events::OOO_DATE_ONLY,
+            crate::events::OOO_FOLLOWING,
             // Checked against the doc-comment rule: a fixed literal raised
             // only after Google's insert succeeded, no interpolation, and
             // `create_event`'s `.map_err(user_facing)` adds no context.

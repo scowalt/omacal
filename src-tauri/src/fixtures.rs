@@ -266,6 +266,7 @@ pub async fn seed_demo(pool: &SqlitePool, now_ms: i64) -> anyhow::Result<usize> 
                 id: 0,
                 calendar_id: cal_ids[sp.cal],
                 google_id: format!("demo-{i}"),
+                google_event_type: None,
                 summary: Some(sp.title.to_string()),
                 location: sp.location.map(str::to_string),
                 start_utc: start,

@@ -201,6 +201,7 @@ mod tests {
             id: 1,
             calendar_id: 1,
             google_id: "abc123".into(),
+            google_event_type: None,
             summary: Some("Design sync".into()),
             location: Some("Room 2".into()),
             start_utc: 1_786_352_400_000,
@@ -236,6 +237,21 @@ mod tests {
         assert!(out.contains("LOCATION:Room 2"), "{out}");
         assert!(out.contains("DTSTART;TZID=Europe/Sofia:20260810T120000"), "{out}");
         assert!(!out.contains("RRULE"), "a one-off carries no rule: {out}");
+    }
+
+    #[test]
+    fn ooo_export_keeps_timed_value_types_even_when_presented_all_day() {
+        let mut ev = stored();
+        ev.google_event_type = Some("outOfOffice".into());
+        ev.start_tz = "America/New_York".into();
+        ev.end_tz = "America/New_York".into();
+        ev.start_utc = 1792123200000;
+        ev.end_utc = 1792555200000;
+        assert!(ev.presentation(omacal_core::Interval { start_ms: ev.start_utc, end_ms: ev.end_utc }).is_all_day());
+        let out = ics_for(&ev, ev.start_utc, ev.end_utc, now()).unwrap();
+        assert!(out.contains("DTSTART;TZID=America/New_York:20261016T000000"), "{out}");
+        assert!(out.contains("DTEND;TZID=America/New_York:20261021T000000"), "{out}");
+        assert!(!out.contains("VALUE=DATE"), "{out}");
     }
 
     /// The occurrence, not the series — and not the series' identity either.
