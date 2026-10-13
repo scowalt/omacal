@@ -13,13 +13,25 @@
 //! search that could change an event would be a second way to do what the
 //! popover already does with every guard it has.
 
-use omacal_core::search::{by_distance, nearest, Hit};
+use omacal_core::search::{by_distance, nearest, Hit as NativeHit};
 use omacal_core::layout::Interval;
 use omacal_store::StoredEvent;
 use sqlx::SqlitePool;
 
 use crate::cli::{task_json, TaskHit};
 use crate::AppState;
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Hit {
+    pub event_id: i64,
+    pub title: String,
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub all_day: bool,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+}
 
 /// What a search answers with: events and tasks, kept apart.
 ///
@@ -123,11 +135,11 @@ pub(crate) async fn search_impl(
     }
 
     let rows = omacal_store::search_events(pool, q).await?;
-    let mut events: Vec<Hit> = rows
+    let mut native: Vec<NativeHit> = rows
         .iter()
         .map(|src| {
             let iv = resolve(src, now_ms);
-            Hit {
+            NativeHit {
                 event_id: src.id,
                 title: src.summary.clone().unwrap_or_else(|| "(no title)".into()),
                 start_ms: iv.start_ms,
@@ -135,7 +147,14 @@ pub(crate) async fn search_impl(
             }
         })
         .collect();
-    by_distance(&mut events, now_ms);
+    by_distance(&mut native, now_ms);
+    let events = native.into_iter().map(|hit| {
+        let src = rows.iter().find(|r| r.id == hit.event_id).expect("hit came from these rows");
+        let shown = src.presentation(Interval { start_ms: hit.start_ms, end_ms: hit.end_ms });
+        let dates = shown.inclusive_dates();
+        Hit { event_id: hit.event_id, title: hit.title, start_ms: hit.start_ms, end_ms: hit.end_ms,
+            all_day: shown.is_all_day(), start_date: dates.as_ref().map(|d| d.0.clone()), end_date: dates.map(|d| d.1) }
+    }).collect();
 
     // The zone a task's "late" is read in; the same `TimeZone::system()` the
     // CLI's own `tasks` read uses, and the window ignores the formatted `due`
@@ -203,7 +222,7 @@ mod tests {
 
     fn row(cal: i64, gid: &str, title: &str, start_ms: i64) -> StoredEvent {
         StoredEvent {
-            id: 0, calendar_id: cal, google_id: gid.into(), summary: Some(title.into()),
+            id: 0, calendar_id: cal, google_id: gid.into(), google_event_type: None, summary: Some(title.into()),
             location: None, start_utc: start_ms, end_utc: start_ms + HOUR,
             start_tz: "UTC".into(), end_tz: "UTC".into(), is_all_day: false,
             recurrence: None, recurring_event_id: None, original_start_utc: None,
@@ -214,6 +233,25 @@ mod tests {
             attendees: Vec::new(),
             reminders: Default::default(), calendar_default_reminders: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn ooo_search_projects_the_nearest_interval_not_the_master() {
+        let pool = pool_with_two_calendars().await;
+        let ms = |s: &str| s.parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        let mut source = row(1, "ooo", "OOO recurring", ms("2026-03-07T00:00:00-05:00"));
+        source.google_event_type = Some("outOfOffice".into());
+        source.start_tz = "America/New_York".into();
+        source.end_utc = source.start_utc + 24 * HOUR;
+        source.recurrence = Some("RRULE:FREQ=DAILY;COUNT=3".into());
+        insert(&pool, &source).await;
+        let master_day = search_impl(&pool, "OOO", source.start_utc).await.unwrap();
+        assert!(master_day.events[0].all_day);
+        assert_eq!(master_day.events[0].start_date.as_deref(), Some("2026-03-07"));
+        let later = search_impl(&pool, "OOO", ms("2026-03-08T00:00:00-05:00")).await.unwrap();
+        assert!(!later.events[0].all_day);
+        assert_eq!(later.events[0].start_date, None);
+        assert_eq!(later.events[0].end_ms, ms("2026-03-09T01:00:00-04:00"));
     }
 
     async fn insert(pool: &SqlitePool, e: &StoredEvent) {

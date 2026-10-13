@@ -65,6 +65,30 @@ WebCal, local): OmaCal emails nobody there, so there is no notify question to as
 is Google's model and says nothing reliable about who else sees a change. WebCal feeds are read-only
 subscriptions (Settings → Accounts → "Add WebCal account"); they never take writes, RSVPs, or tasks.
 
+### All-day presentation versus native timing
+
+`allDay` describes presentation, not Google's endpoint format. Identified
+Google `outOfOffice` intervals spanning exact authored-zone civil days appear
+all-day; partial days and unknown/default event types remain timed.
+`startDate` / inclusive `endDate`, when present on event rows or search hits,
+are the dates to use for all-day prose. Epoch/RFC 3339 endpoints stay native.
+`events show` additionally exposes `nativeAllDay` and optional
+`googleEventType`. A repeating row shown by ID is the master summary; list
+rows and search hits describe their selected occurrence, which can have a
+different presentation around DST.
+
+OOO is still editable with timed `events update` fields even when `allDay` is
+true. Keep omitted timestamps unchanged; never turn it into date-only input.
+Use scope `this` or `all`: OOO `following` edits are refused because splitting
+would lose its provider behavior. Following **deletion** remains supported.
+The CLI creates ordinary events, not special OOO events.
+
+Legacy cached rows have unknown type until refetched. For the supported manual
+calendar rebuild and its history/window costs, see
+[the run guide](../../docs/running-on-macos.md#google-ooo-still-appears-timed).
+Ask before rebuilding; this is not an automatic migration or a reason to
+change the database directly.
+
 `search`'s `tasks` (v5.3+) are `omacal tasks --json`'s own row shape (`id`,
 `summary`, `notes`, `due`, `dueMs`, `dueAllDay`, `overdue`, `completed`,
 `list`, `listId`, `canWrite`) for **open** tasks whose title matches, due
@@ -138,8 +162,9 @@ omacal events respond 41 no --keep-meeting --json   # own meeting: out, not off
   update` moves and retitles occurrences, it does not turn a single event
   into a series or edit a cadence. Send the user to the app's form.
 - Times read in the user's display zone, `HH:MM`, strict.
-- All-day events cannot be *edited* from the CLI yet (create/delete/respond
-  work); send the user to the app for that.
+- Native date-only events (`nativeAllDay: true`) cannot be *edited* from the
+  CLI yet (create/delete/respond work); send the user to the app for that.
+  Whole-day OOO remains natively timed and does not have that limitation.
 
 ## Exit codes
 

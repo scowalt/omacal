@@ -26,8 +26,17 @@ pub struct DeclinedGuest {
     pub start_utc: i64,
     pub end_utc: i64,
     pub is_all_day: bool,
+    pub google_event_type: Option<String>,
+    pub event_timezone: String,
     pub calendar_timezone: String,
     pub color_hex: Option<String>,
+}
+
+impl DeclinedGuest {
+    pub fn presentation(&self) -> omacal_core::presentation::Presentation {
+        omacal_core::presentation::presentation(self.is_all_day, self.google_event_type.as_deref(),
+            omacal_core::Interval { start_ms: self.start_utc, end_ms: self.end_utc }, &self.event_timezone, &self.calendar_timezone)
+    }
 }
 
 /// Every unacknowledged decline on the user's own upcoming meetings, one row
@@ -49,7 +58,7 @@ pub async fn declined_guests(
 ) -> anyhow::Result<Vec<DeclinedGuest>> {
     let rows = sqlx::query(
         "SELECT e.calendar_id, e.google_id, e.recurring_event_id, e.summary,
-                e.start_utc, e.end_utc, e.is_all_day, e.attendees_json,
+                e.start_utc, e.end_utc, e.is_all_day, e.attendees_json, e.google_event_type, e.start_tz,
                 c.timezone, COALESCE(c.color_override, c.color_hex) AS color_hex
            FROM events e
            JOIN calendars c ON c.id = e.calendar_id
@@ -103,6 +112,8 @@ pub async fn declined_guests(
                 start_utc: row.get("start_utc"),
                 end_utc: row.get("end_utc"),
                 is_all_day: row.get::<i64, _>("is_all_day") != 0,
+                google_event_type: row.get("google_event_type"),
+                event_timezone: row.get("start_tz"),
                 calendar_timezone: row.get("timezone"),
                 color_hex: row.get("color_hex"),
             });
@@ -191,6 +202,7 @@ mod tests {
             id: 0,
             calendar_id: 1,
             google_id: gid.into(),
+            google_event_type: None,
             summary: Some("Planning".into()),
             location: None,
             start_utc: start,

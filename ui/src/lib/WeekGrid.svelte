@@ -1346,7 +1346,7 @@
 
     let d: EventDetail;
     try {
-      d = await getEventDetail(event.id);
+      d = await getEventDetail(event.id, event.start_ms, event.end_ms);
     } catch (e) {
       // Nothing to show. Close rather than leave an empty shell open, but
       // only if the user hasn't already clicked something else while this
@@ -1387,7 +1387,7 @@
     // on screen stands unchanged.
     await tick();
     if (!isSelected(event)) return;
-    refreshEvent(event.id)
+    refreshEvent(event.id, event.start_ms, event.end_ms)
       .then((fresh) => {
         if (isSelected(event) && JSON.stringify(fresh) !== JSON.stringify(detail)) {
           detail = fresh;
@@ -2347,14 +2347,14 @@
        here restyles the one block this popover was ever open for,
        regardless of what has since been clicked. -->
   {@const id = selectedId}
-  {@const startMs = selectedStartMs}
+  {@const startMs = detail.occurrence_start_ms ?? selectedStartMs}
   <!-- `endMs` falls back to `startMs` only to satisfy the type: the `{#if}`
        above already proves a block is selected, and `selectedEndMs` is
        assigned and cleared in lockstep with `selectedStartMs`, so the
        fallback is unreachable. Written this way rather than added to the
        `{#if}` because a fourth condition there would suggest the three
        states can disagree. -->
-  {@const occurrence = { detail, startMs, endMs: selectedEndMs ?? startMs }}
+  {@const occurrence = { detail, startMs, endMs: detail.occurrence_end_ms ?? selectedEndMs ?? startMs }}
   {@const rect = anchor}
   {#key detail.id}
   <!-- The details as a pending edit left them (part 2 spec §1.3); Edit and

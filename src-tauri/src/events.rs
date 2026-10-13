@@ -11,10 +11,10 @@ pub struct EventDetail {
     pub conference_uri: Option<String>,
     pub start_ms: i64,
     pub end_ms: i64,
-    /// The first day an all-day event covers, `yyyy-mm-dd`, read in the
-    /// **calendar's** zone. `None` for a timed event, which has no date of its
-    /// own — it has an instant, and which day that falls on is a question about
-    /// the reader, not about the event.
+    /// The first presented all-day date, `yyyy-mm-dd`: the calendar's for
+    /// native date-only events, the authored event's for whole-day OOO.
+    /// `None` for a presentation-timed interval. Contextual dates describe the
+    /// clicked interval while `start_ms`/`end_ms` keep the source/master anchors.
     ///
     /// Here rather than derived in the UI because the UI cannot derive it. The
     /// store holds an instant for an all-day event too, and it is midnight in
@@ -34,7 +34,12 @@ pub struct EventDetail {
     /// reports the same date twice rather than two different ones the form
     /// would have to reconcile.
     pub end_date: Option<String>,
+    /// Display classification, independent of the provider's timing format.
     pub is_all_day: bool,
+    pub native_is_all_day: bool,
+    pub is_out_of_office: bool,
+    pub occurrence_start_ms: Option<i64>,
+    pub occurrence_end_ms: Option<i64>,
     pub is_recurring: bool,
     /// Whether this row is a **materialised exception** — one occurrence the
     /// organizer detached from its series — rather than the series master.
@@ -235,18 +240,68 @@ pub(crate) fn is_recurring(recurrence: &Option<String>, recurring_event_id: &Opt
 /// cannot drift apart. All this adds is the "is it all-day at all" gate, which
 /// is the only part the grid does not want.
 fn all_day_dates(event: &omacal_store::StoredEvent, cal_tz: &str) -> Option<(String, String)> {
-    if !event.is_all_day {
-        return None;
+    all_day_dates_for(event, cal_tz, omacal_core::Interval { start_ms: event.start_utc, end_ms: event.end_utc })
+}
+
+/// Resolve against the authoritative cache after a refresh/write, not the
+/// stale clicked interval. Expansion is the existing native recurrence path.
+pub(crate) async fn detail_after_reload(
+    state: &AppState, id: i64, before: &omacal_store::StoredEvent,
+    context: omacal_core::Interval, scope: Option<&str>,
+) -> anyhow::Result<EventDetail> {
+    if scope == Some("this") && before.recurrence.is_some() {
+        let child: Option<(i64, i64, i64)> = sqlx::query_as(
+            "SELECT id, start_utc, end_utc FROM events WHERE calendar_id = ?1
+             AND recurring_event_id = ?2 AND original_start_utc = ?3 AND status != 'cancelled'",
+        ).bind(before.calendar_id).bind(&before.google_id).bind(context.start_ms)
+            .fetch_optional(&state.pool).await?;
+        if let Some((child_id, start_ms, end_ms)) = child {
+            return event_detail_with_context(state, child_id, Some(omacal_core::Interval { start_ms, end_ms })).await;
+        }
     }
-    Some(crate::write::all_day_span_dates(event.start_utc, event.end_utc, cal_tz))
+    let (now, _, _) = omacal_store::event_by_id(&state.pool, id).await?
+        .ok_or_else(|| anyhow::anyhow!("that event is no longer here"))?;
+    let interval = if now.recurrence.is_none() {
+        omacal_core::Interval { start_ms: now.start_utc, end_ms: now.end_utc }
+    } else if (now.start_utc, now.end_utc, &now.start_tz, &now.recurrence)
+        == (before.start_utc, before.end_utc, &before.start_tz, &before.recurrence) {
+        context
+    } else {
+        let anchor = context.start_ms.saturating_add(now.start_utc.saturating_sub(before.start_utc));
+        let pad = 2 * 86_400_000;
+        crate::commands::occurrences(&now, anchor.saturating_sub(pad), anchor.saturating_add(pad))
+            .into_iter().min_by_key(|iv| (i128::from(iv.start_ms) - i128::from(anchor)).abs())
+            .unwrap_or(omacal_core::Interval { start_ms: now.start_utc, end_ms: now.end_utc })
+    };
+    event_detail_with_context(state, id, Some(interval)).await
+}
+
+fn occurrence_context(start: Option<i64>, end: Option<i64>) -> anyhow::Result<Option<omacal_core::Interval>> {
+    match (start, end) {
+        (None, None) => Ok(None),
+        (Some(start_ms), Some(end_ms)) if end_ms > start_ms
+            && jiff::Timestamp::from_millisecond(start_ms).is_ok()
+            && jiff::Timestamp::from_millisecond(end_ms).is_ok() => Ok(Some(omacal_core::Interval { start_ms, end_ms })),
+        _ => anyhow::bail!("invalid occurrence context"),
+    }
+}
+
+fn all_day_dates_for(event: &omacal_store::StoredEvent, cal_tz: &str, interval: omacal_core::Interval) -> Option<(String, String)> {
+    omacal_core::presentation::presentation(
+        event.is_all_day, event.google_event_type.as_deref(), interval, &event.start_tz, cal_tz,
+    ).inclusive_dates()
 }
 
 #[tauri::command]
 pub async fn event_detail(
     state: tauri::State<'_, AppState>,
     id: i64,
+    occurrence_start_ms: Option<i64>,
+    occurrence_end_ms: Option<i64>,
 ) -> Result<EventDetail, String> {
-    event_detail_impl(&state, id).await.map_err(|e| crate::errors::user_facing(&e))
+    let context = occurrence_context(occurrence_start_ms, occurrence_end_ms)
+        .map_err(|e| crate::errors::user_facing(&e))?;
+    event_detail_with_context(&state, id, context).await.map_err(|e| crate::errors::user_facing(&e))
 }
 
 /// The body of `event_detail`, minus the Tauri `State` wrapper — also the tail
@@ -261,6 +316,12 @@ pub async fn event_detail(
 /// at 240 passing tests — while the demo popover started offering three RSVP
 /// buttons again, the exact thing the gate inside exists to prevent.
 pub(crate) async fn event_detail_impl(state: &AppState, id: i64) -> anyhow::Result<EventDetail> {
+    event_detail_with_context(state, id, None).await
+}
+
+pub(crate) async fn event_detail_with_context(
+    state: &AppState, id: i64, context: Option<omacal_core::Interval>,
+) -> anyhow::Result<EventDetail> {
     let (event, access_role, cal_google_id, account_email, cal_tz) =
         omacal_store::event_for_detail(&state.pool, id)
             .await?
@@ -269,7 +330,12 @@ pub(crate) async fn event_detail_impl(state: &AppState, id: i64) -> anyhow::Resu
     let can_respond = can_respond(state.demo, &access_role, &event.attendees);
     let is_recurring = is_recurring(&event.recurrence, &event.recurring_event_id);
     let is_series_exception = event.recurring_event_id.is_some();
-    let (start_date, end_date) = match all_day_dates(&event, &cal_tz) {
+    let dates = match context {
+        Some(iv) => all_day_dates_for(&event, &cal_tz, iv),
+        None => all_day_dates(&event, &cal_tz),
+    };
+    let presentation_all_day = dates.is_some();
+    let (start_date, end_date) = match dates {
         Some((start, end)) => (Some(start), Some(end)),
         None => (None, None),
     };
@@ -280,6 +346,7 @@ pub(crate) async fn event_detail_impl(state: &AppState, id: i64) -> anyhow::Resu
     // Before the literal below moves `organizer_email` into the detail.
     let is_organizer = owns_event(event.organizer_email.as_deref(), &account_email, &cal_google_id);
     let mails_guests = crate::caldav_write::calendar_mails_guests(&state.pool, event.calendar_id).await?;
+    let is_out_of_office = event.is_out_of_office();
     Ok(EventDetail {
         id: event.id,
         calendar_id: event.calendar_id,
@@ -291,7 +358,11 @@ pub(crate) async fn event_detail_impl(state: &AppState, id: i64) -> anyhow::Resu
         end_ms: event.end_utc,
         start_date,
         end_date,
-        is_all_day: event.is_all_day,
+        is_all_day: presentation_all_day,
+        native_is_all_day: event.is_all_day,
+        is_out_of_office,
+        occurrence_start_ms: context.map(|iv| iv.start_ms),
+        occurrence_end_ms: context.map(|iv| iv.end_ms),
         is_recurring,
         is_series_exception,
         repeat: recurrence_controls.repeat,
@@ -838,8 +909,15 @@ async fn respond_via_client(
 }
 
 #[tauri::command]
-pub async fn refresh_event(state: tauri::State<'_, AppState>, id: i64) -> Result<EventDetail, String> {
-    refresh_event_impl(&state, id).await
+pub async fn refresh_event(
+    state: tauri::State<'_, AppState>, id: i64,
+    occurrence_start_ms: Option<i64>, occurrence_end_ms: Option<i64>,
+) -> Result<EventDetail, String> {
+    let context = occurrence_context(occurrence_start_ms, occurrence_end_ms)
+        .map_err(|e| crate::errors::user_facing(&e))?;
+    if context.is_none() { return refresh_event_impl(&state, id).await; }
+    crate::demo_sync_guard(state.demo)?;
+    refresh_impl(&state, id, context).await.map_err(|e| crate::errors::user_facing(&e))
 }
 
 /// The body of `refresh_event`, split for the same reason as
@@ -849,7 +927,7 @@ pub async fn refresh_event(state: tauri::State<'_, AppState>, id: i64) -> Result
 /// token, and demo mode has no account to read as.
 async fn refresh_event_impl(state: &AppState, id: i64) -> Result<EventDetail, String> {
     crate::demo_sync_guard(state.demo)?;
-    refresh_impl(state, id).await.map_err(|e| crate::errors::user_facing(&e))
+    refresh_impl(state, id, None).await.map_err(|e| crate::errors::user_facing(&e))
 }
 
 /// Re-pulls one event from Google through the same mapping as sync, then
@@ -857,7 +935,7 @@ async fn refresh_event_impl(state: &AppState, id: i64) -> Result<EventDetail, St
 /// elsewhere — another attendee's answer, a moved time — while the popover was
 /// open. Its failures are the caller's to ignore: whatever `EventDetail` is
 /// already on screen is still valid if this does not succeed.
-async fn refresh_impl(state: &AppState, id: i64) -> anyhow::Result<EventDetail> {
+async fn refresh_impl(state: &AppState, id: i64, context: Option<omacal_core::Interval>) -> anyhow::Result<EventDetail> {
     let (ev, _access_role, cal_google_id, account_email) = omacal_store::event_for_write(&state.pool, id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("that event is no longer here"))?;
@@ -866,12 +944,15 @@ async fn refresh_impl(state: &AppState, id: i64) -> anyhow::Result<EventDetail> 
     let token = crate::access_token_for(state, &cfg, &account_email).await?;
     let client = omacal_google::CalendarClient::new(crate::GOOGLE_CALENDAR_API, &token);
 
-    if refresh_via_client(&state.pool, ev, &cal_google_id, &client).await? {
+    if refresh_via_client(&state.pool, ev.clone(), &cal_google_id, &client).await? {
         // A repaired Join link belongs in the bar widget's feed too, not only
         // in the popover that asked.
         crate::upcoming::refresh_soon(state.pool.clone(), state.demo);
     }
-    event_detail_impl(state, id).await
+    match context {
+        Some(iv) => detail_after_reload(state, id, &ev, iv, None).await,
+        None => event_detail_impl(state, id).await,
+    }
 }
 
 /// The Google half of [`refresh_impl`], split out so it runs against a
@@ -1476,6 +1557,18 @@ fn row_from_wire(
 /// `target_calendar_id` is the calendar the event should end up on, or `None`
 /// for "leave it where it is" — which is also what the *same* calendar means,
 /// so a form that always sends its picker's value costs nothing.
+pub(crate) const OOO_DATE_ONLY: &str = "Out-of-office events must keep start and end times.";
+pub(crate) const OOO_FOLLOWING: &str =
+    "OmaCal cannot split out-of-office events — edit this event or all events instead.";
+
+fn validate_ooo_edit(kind: Option<&str>, scope: &str, when: &crate::write::When) -> anyhow::Result<()> {
+    if kind == Some("outOfOffice") {
+        if when.is_all_day() { anyhow::bail!(OOO_DATE_ONLY); }
+        if scope == "following" { anyhow::bail!(OOO_FOLLOWING); }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn update_event(
@@ -1486,8 +1579,19 @@ pub async fn update_event(
     fields: crate::write::EventInput,
     send_updates: String,
     target_calendar_id: Option<i64>,
+    occurrence_end_ms: Option<i64>,
 ) -> Result<EventDetail, String> {
-    update_event_body(
+    let context = match occurrence_end_ms {
+        Some(end) => occurrence_context(Some(occurrence_start_ms), Some(end))
+            .map_err(|e| crate::errors::user_facing(&e))?,
+        None => None,
+    };
+    // Read-only capture; demo mode must still reach its gate without a DB read.
+    let before = if context.is_some() && !state.demo {
+        omacal_store::event_by_id(&state.pool, id).await
+            .map_err(|e| crate::errors::user_facing(&e))?.map(|(row, _, _)| row)
+    } else { None };
+    let result = update_event_body(
         &state,
         id,
         &scope,
@@ -1495,8 +1599,12 @@ pub async fn update_event(
         fields,
         &send_updates,
         target_calendar_id,
-    )
-    .await
+    ).await?;
+    match (before, context) {
+        (Some(before), Some(iv)) if scope != "following" => detail_after_reload(&state, result.id, &before, iv, Some(&scope))
+            .await.map_err(|e| crate::errors::user_facing(&e)),
+        _ => Ok(result),
+    }
 }
 
 /// The whole of `update_event` minus the Tauri `State` wrapper — see
@@ -1622,6 +1730,10 @@ async fn update_impl(
     // shows an Edit button cannot silently refuse the save it implies.
     // `demo: false` because that half is already handled above, with its own
     // message and before any database access.
+    // Before config/credentials: known OOO cannot change to date-only or
+    // split into a default-event tail. Legacy caches are rechecked on the wire.
+    validate_ooo_edit(ev.google_event_type.as_deref(), scope, &fields.when)?;
+
     if !can_edit(false, &access_role) {
         anyhow::bail!("this calendar is not writable from OmaCal");
     }
@@ -1834,6 +1946,9 @@ async fn update_via_client(
     send_updates: &str,
     client: &omacal_google::CalendarClient,
 ) -> anyhow::Result<()> {
+    validate_ooo_edit(ev.google_event_type.as_deref(), scope, &after.when)?;
+    let requested_scope = scope;
+
     // A row carrying `recurrence` is a series master; scope "this" must still
     // go through instance resolution for it, which is why `own_id` is offered
     // as the master when there is no `recurring_event_id`.
@@ -1938,6 +2053,7 @@ async fn update_via_client(
             None => "all",
             Some(master_id) => {
                 let master = client.get_event(cal_google_id, master_id).await?;
+                validate_ooo_edit(master.event_type.as_deref(), requested_scope, &after.when)?;
                 let master_row = row_from_wire(&master, ev.calendar_id, cal_tz)?;
                 if split_at_ms > master_row.start_utc {
                     return split_series(
@@ -1981,13 +2097,19 @@ async fn update_via_client(
         }
     };
 
-    let (target_start, target_end, if_match) = if event_id == ev.google_id {
+    // A dangerous native-format/split request must read provider identity
+    // even when it targets the cached row itself. A null old cache is not
+    // evidence that Google holds a default event. Safe timed PATCHes need no
+    // extra GET: they neither change type nor replace OOO/auto-decline fields.
+    let risky = after.when.is_all_day() || requested_scope == "following";
+    let (target_start, target_end, if_match) = if event_id == ev.google_id && !risky {
         (ev.start_utc, ev.end_utc, ev.etag.clone())
     } else {
         let target_event = match instance {
             Some(inst) => inst,
             None => client.get_event(cal_google_id, &event_id).await?,
         };
+        validate_ooo_edit(target_event.event_type.as_deref(), requested_scope, &after.when)?;
         let row = row_from_wire(&target_event, ev.calendar_id, cal_tz)?;
         (row.start_utc, row.end_utc, row.etag)
     };
@@ -2040,6 +2162,7 @@ async fn update_via_client(
             // try once more. The user's own diff is unchanged: it is still
             // only the fields they touched, so the other edit survives.
             let fresh = client.get_event(cal_google_id, &event_id).await?;
+            validate_ooo_edit(fresh.event_type.as_deref(), requested_scope, &after.when)?;
             let row = row_from_wire(&fresh, ev.calendar_id, cal_tz)?;
             let retry = edit_patch_body(
                 &ev,
@@ -2182,6 +2305,7 @@ async fn split_series(
     send_updates: &str,
     client: &omacal_google::CalendarClient,
 ) -> anyhow::Result<()> {
+    validate_ooo_edit(master.event_type.as_deref(), "following", &after.when)?;
     let lines: Vec<String> = master.recurrence.clone().unwrap_or_default();
     let rules: Vec<&String> = lines.iter().filter(|l| crate::write::is_rrule(l)).collect();
     // Somebody removed the rule between the popover opening and the save.
@@ -3372,7 +3496,7 @@ mod tests {
 
     fn wire_instance(id: &str) -> omacal_google::model::Event {
         omacal_google::model::Event {
-            id: id.into(), status: "confirmed".into(), etag: None, ical_uid: None,
+            id: id.into(), event_type: None, status: "confirmed".into(), etag: None, ical_uid: None,
             summary: None, description: None, location: None,
             start: Default::default(), end: Default::default(),
             recurrence: None, recurring_event_id: None, original_start_time: None,
@@ -3431,7 +3555,7 @@ mod tests {
 
     fn stored(attendees: Vec<Attendee>) -> omacal_store::StoredEvent {
         omacal_store::StoredEvent {
-            id: 1, calendar_id: 1, google_id: "ev1".into(),
+            id: 1, calendar_id: 1, google_id: "ev1".into(), google_event_type: None,
             summary: None, location: None, start_utc: 0, end_utc: 0,
             start_tz: "UTC".into(), end_tz: "UTC".into(), is_all_day: false,
             recurrence: None, recurring_event_id: None, original_start_utc: None,
@@ -3453,7 +3577,7 @@ mod tests {
     fn merge_patched_updates_etag_sequence_attendees_and_derives_self_response() {
         let mut row = stored(vec![guest(true)]);
         let patched = omacal_google::model::Event {
-            id: "ev1".into(), status: "confirmed".into(), etag: Some("\"new\"".into()),
+            id: "ev1".into(), event_type: None, status: "confirmed".into(), etag: Some("\"new\"".into()),
             ical_uid: None, summary: None, description: None, location: None,
             start: Default::default(), end: Default::default(),
             recurrence: None, recurring_event_id: None, original_start_time: None,
@@ -4248,7 +4372,8 @@ mod tests {
         let mut expected = [
             "id", "calendar_id", "title", "description", "location",
             "conference_uri", "start_ms", "end_ms", "start_date", "end_date",
-            "is_all_day", "is_recurring", "is_series_exception", "recurrence", "repeat", "weekly_days",
+            "is_all_day", "native_is_all_day", "is_out_of_office", "occurrence_start_ms", "occurrence_end_ms",
+            "is_recurring", "is_series_exception", "recurrence", "repeat", "weekly_days",
             "repeat_end", "color",
             "organizer_email", "self_response", "can_respond", "can_edit", "is_organizer", "guests_can_modify",
             "mails_guests", "attendees", "reminders", "calendar_default_reminders",
@@ -4326,6 +4451,132 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("cannot be answered from OmaCal"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn ooo_detail_describes_the_clicked_interval_not_the_masters_presentation() {
+        let ms = |s: &str| s.parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        let mut ooo = stored(vec![]);
+        ooo.google_event_type = Some("outOfOffice".into());
+        ooo.start_tz = "America/New_York".into();
+        ooo.start_utc = ms("2026-03-07T00:00:00-05:00");
+        ooo.end_utc = ms("2026-03-08T00:00:00-05:00");
+        ooo.recurrence = Some("RRULE:FREQ=DAILY;COUNT=3".into());
+        let (pool, id) = seeded_pool_with(&ooo).await;
+        let state = state_with(pool, false);
+        let master = event_detail_impl(&state, id).await.unwrap();
+        assert!(master.is_all_day);
+        assert!(!master.native_is_all_day);
+        assert!(master.is_out_of_office);
+        assert_eq!(master.start_date.as_deref(), Some("2026-03-07"));
+        let clicked = omacal_core::Interval {
+            start_ms: ms("2026-03-08T00:00:00-05:00"),
+            end_ms: ms("2026-03-09T01:00:00-04:00"),
+        };
+        let detail = event_detail_with_context(&state, id, Some(clicked)).await.unwrap();
+        assert!(!detail.is_all_day, "the fixed-duration DST occurrence is not a whole local day");
+        assert!(!detail.native_is_all_day);
+        assert!(detail.start_date.is_none());
+        assert_eq!((detail.start_ms, detail.end_ms), (ooo.start_utc, ooo.end_utc), "master/edit anchors remain distinct");
+        assert_eq!(detail.occurrence_start_ms, Some(clicked.start_ms));
+        assert_eq!(detail.occurrence_end_ms, Some(clicked.end_ms));
+    }
+
+    #[tokio::test]
+    async fn ooo_refresh_uses_the_updated_native_occurrence_interval() {
+        let ms = |s: &str| s.parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        let mut ev = stored(vec![]);
+        ev.google_event_type = Some("outOfOffice".into());
+        ev.start_tz = "America/New_York".into();
+        ev.start_utc = ms("2026-03-07T00:00:00-05:00");
+        ev.end_utc = ms("2026-03-08T00:00:00-05:00");
+        ev.recurrence = Some("RRULE:FREQ=DAILY;COUNT=3".into());
+        let (pool, id) = seeded_pool_on_cal(&mut ev, "America/New_York").await;
+        let clicked = omacal_core::Interval { start_ms: ms("2026-03-09T00:00:00-04:00"), end_ms: ms("2026-03-10T00:00:00-04:00") };
+        let state = state_with(pool.clone(), false);
+        assert!(event_detail_with_context(&state, id, Some(clicked)).await.unwrap().is_all_day);
+        let server = wiremock::MockServer::start().await;
+        let mut wire = wire_occurrence(&ev.google_id, ms("2026-03-07T01:00:00-05:00"), ms("2026-03-08T01:00:00-05:00"), "new-etag");
+        wire["eventType"] = "outOfOffice".into();
+        wire["recurrence"] = serde_json::json!(["RRULE:FREQ=DAILY;COUNT=3"]);
+        wire["start"]["timeZone"] = "America/New_York".into();
+        wire["end"]["timeZone"] = "America/New_York".into();
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(wire)).expect(1).mount(&server).await;
+        refresh_via_client(&pool, ev.clone(), "primary", &omacal_google::CalendarClient::new(server.uri(), "test-token")).await.unwrap();
+        let d = detail_after_reload(&state, id, &ev, clicked, None).await.unwrap();
+        assert!(!d.is_all_day, "refresh must not keep projecting the old midnight endpoints");
+        assert_eq!(d.occurrence_start_ms, Some(ms("2026-03-09T01:00:00-04:00")));
+        assert_eq!(d.occurrence_end_ms, Some(ms("2026-03-10T01:00:00-04:00")));
+        assert!(!d.native_is_all_day);
+    }
+
+    #[tokio::test]
+    async fn the_ooo_presentation_golden_carries_real_layout_and_native_details() {
+        let mut source = stored(vec![]);
+        source.google_id = "ooo-display-regression".into();
+        source.google_event_type = Some("outOfOffice".into());
+        source.summary = Some("OOO (🍂)".into());
+        source.start_utc = 1792123200000;
+        source.end_utc = 1792555200000;
+        source.start_tz = "America/New_York".into();
+        source.end_tz = "America/New_York".into();
+        let (pool, id) = seeded_pool_on_cal(&mut source, "Pacific/Auckland").await;
+        source = omacal_store::event_by_id(&pool, id).await.unwrap().unwrap().0;
+        let state = state_with(pool.clone(), false);
+        let detail = event_detail_with_context(&state, id, Some(omacal_core::Interval { start_ms: source.start_utc, end_ms: source.end_utc })).await.unwrap();
+        let start = "2026-10-19T00:00:00Z".parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        let week = crate::commands::assemble_week(&[source.clone()], start, "UTC");
+        let mut ordinary = source.clone();
+        ordinary.id = 501;
+        ordinary.google_event_type = Some("futureType".into());
+        ordinary.summary = Some("OOO unknown-type control".into());
+        let mut native = source.clone();
+        native.id = 502;
+        native.is_all_day = true;
+        native.google_event_type = None;
+        native.summary = Some("Native date-only control".into());
+        native.start_utc = "2026-10-19T00:00:00+13:00".parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        native.end_utc = native.start_utc + 86_400_000;
+        let controls = crate::commands::assemble_week(&[source.clone(), ordinary, native], start, "UTC");
+        assert_eq!(controls.all_day_events.len(), 2);
+        assert!(controls.days[0].events.iter().any(|e| e.id == 501 && !e.is_all_day));
+        assert_eq!(controls.all_day_events.iter().find(|e| e.id == 502).unwrap().all_day_dates,
+            Some(("2026-10-19".into(), "2026-10-19".into())));
+        assert_eq!(week.all_day_events.len(), 1);
+        assert_eq!(week.all_day_events[0].all_day_dates, Some(("2026-10-16".into(), "2026-10-20".into())));
+        assert!(detail.is_all_day && !detail.native_is_all_day && detail.is_out_of_office);
+        let mut partial = source.clone();
+        partial.start_utc += HOUR;
+        partial.end_utc += HOUR;
+        omacal_store::upsert_event(&pool, &partial).await.unwrap();
+        let partial_detail = detail_after_reload(&state, id, &source,
+            omacal_core::Interval { start_ms: source.start_utc, end_ms: source.end_utc }, Some("all")).await.unwrap();
+        assert!(!partial_detail.is_all_day && !partial_detail.native_is_all_day);
+        let partial_week = crate::commands::assemble_week(&[partial], start, "UTC");
+        assert!(partial_week.all_day_events.is_empty());
+        let ms = |s: &str| s.parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        let mut recurring = source.clone();
+        recurring.id = 0;
+        recurring.google_id = "ooo-recurring".into();
+        recurring.summary = Some("OOO recurring".into());
+        recurring.start_utc = ms("2026-03-07T00:00:00-05:00");
+        recurring.end_utc = ms("2026-03-08T00:00:00-05:00");
+        recurring.recurrence = Some("RRULE:FREQ=DAILY;COUNT=3".into());
+        let dst_id = omacal_store::upsert_event(&pool, &recurring).await.unwrap();
+        recurring.id = dst_id;
+        let dst_start = ms("2026-03-02T00:00:00Z");
+        let dst_week = crate::commands::assemble_week(&[recurring.clone()], dst_start, "UTC");
+        let dst_master = event_detail_impl(&state, dst_id).await.unwrap();
+        let mut dst_details = Vec::new();
+        for iv in crate::commands::occurrences(&recurring, dst_start, dst_start + 10 * 86_400_000) {
+            dst_details.push(event_detail_with_context(&state, dst_id, Some(iv)).await.unwrap());
+        }
+        assert_eq!(dst_details.iter().map(|d| d.is_all_day).collect::<Vec<_>>(), vec![true, false, true]);
+        crate::golden::assert_golden("ooo-presentation", &serde_json::json!({
+            "week": week, "detail": detail, "controls": controls, "partial_week": partial_week, "partial_detail": partial_detail,
+            "dst_week": dst_week, "dst_master": dst_master, "dst_details": dst_details,
+        }));
     }
 
     /// An `AppState` a test can hold: demo mode's whole point is that nothing
@@ -5048,6 +5299,146 @@ mod tests {
     /// see "POST /calendars/…/events" and nothing else.
     fn methods_and_paths(sent: &[wiremock::Request]) -> Vec<String> {
         sent.iter().map(|r| format!("{} {}", r.method.as_str(), r.url.path())).collect()
+    }
+
+    #[tokio::test]
+    async fn the_split_boundary_refuses_a_fresh_ooo_master_before_insertion_or_truncation() {
+        let server = wiremock::MockServer::start().await;
+        let mut wire = wire_occurrence("ooo-master", 1792123200000, 1792209600000, "ooo-etag");
+        wire["eventType"] = "outOfOffice".into();
+        wire["recurrence"] = serde_json::json!(["RRULE:FREQ=DAILY"]);
+        let master: omacal_google::model::Event = serde_json::from_value(wire).unwrap();
+        let mut source = omacal_sync::to_stored(&master, 1, "UTC").unwrap();
+        let (pool, _) = seeded_pool_on_cal(&mut source, "UTC").await;
+        let after = form("Changed", source.start_utc + 86_400_000, source.end_utc + 86_400_000);
+        let client = omacal_google::CalendarClient::new(server.uri(), "test");
+        let error = split_series(&pool, source.start_utc + 86_400_000, &source, &master, &source,
+            "cal@x.com", "UTC", &after, "none", &client).await.unwrap_err();
+        assert_eq!(error.to_string(), OOO_FOLLOWING);
+        assert!(requests(&server).await.is_empty(), "even a refused truncation must issue no request");
+    }
+
+    #[tokio::test]
+    async fn cached_ooo_refusals_precede_credentials_and_calendar_permission_checks() {
+        let mut ev = stored(vec![]);
+        ev.google_event_type = Some("outOfOffice".into());
+        ev.recurrence = Some("RRULE:FREQ=DAILY;COUNT=3".into());
+        let (pool, id) = seeded_pool_on_read_only_cal(&mut ev).await;
+        let state = state_with(pool, false);
+        let mut input = all_day_form("Renamed", "2026-10-16", "2026-10-17");
+        assert_eq!(update_impl(&state, id, "all", ev.start_utc, input, "none", None).await.unwrap_err().to_string(), OOO_DATE_ONLY);
+        input = form("Renamed", ev.start_utc, ev.end_utc);
+        assert_eq!(update_impl(&state, id, "following", ev.start_utc, input, "none", None).await.unwrap_err().to_string(), OOO_FOLLOWING);
+    }
+
+    #[tokio::test]
+    async fn ooo_date_only_and_following_edits_send_no_mutating_request_even_with_an_old_cache() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::method;
+        for cached_kind in [None, Some("outOfOffice")] {
+            for scope in ["all", "following"] {
+                let server = MockServer::start().await;
+                let mut wire = wire_occurrence("ooo", 1792123200000, 1792209600000, "ooo-etag");
+                wire["summary"] = "OOO".into();
+                wire["eventType"] = "outOfOffice".into();
+                wire["start"]["timeZone"] = "America/New_York".into();
+                wire["end"]["timeZone"] = "America/New_York".into();
+                wire["recurrence"] = serde_json::json!(["RRULE:FREQ=DAILY"]);
+                Mock::given(method("GET")).respond_with(ResponseTemplate::new(200).set_body_json(&wire))
+                    .mount(&server).await;
+                let parsed = serde_json::from_value(wire).unwrap();
+                let mut ev = omacal_sync::to_stored(&parsed, 1, "America/New_York").unwrap();
+                ev.google_event_type = cached_kind.map(str::to_string);
+                let (pool, _) = seeded_pool_with(&ev).await;
+                let after = if scope == "all" {
+                    all_day_form("changed", "2026-10-16", "2026-10-17")
+                } else {
+                    form("changed", 1792209600000, 1792296000000)
+                };
+                let result = update_via_client(&pool, scope, 1792209600000, ev, "primary", "America/New_York",
+                    after, "none", &omacal_google::CalendarClient::new(server.uri(), "test-token")).await;
+                let sent = requests(&server).await;
+                assert!(sent.iter().all(|r| r.method == "GET"), "{cached_kind:?} {scope}: {:?}", methods_and_paths(&sent));
+                let message = result.unwrap_err().to_string();
+                assert_eq!(message, if scope == "all" {
+                    "Out-of-office events must keep start and end times."
+                } else {
+                    "OmaCal cannot split out-of-office events — edit this event or all events instead."
+                });
+                assert_eq!(crate::errors::user_facing(&anyhow::anyhow!(message.clone())), message);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_ooo_discovered_after_412_is_refused_without_a_retry_write() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::method;
+        let server = MockServer::start().await;
+        let wire = wire_occurrence("ooo", 1792123200000, 1792209600000, "etag");
+        let parsed = serde_json::from_value(wire.clone()).unwrap();
+        let ev = omacal_sync::to_stored(&parsed, 1, "America/New_York").unwrap();
+        let (pool, _) = seeded_pool_with(&ev).await;
+        let reads = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("GET")).respond_with(move |_: &wiremock::Request| {
+            let mut reply = wire.clone();
+            reply["eventType"] = if reads.fetch_add(1, Ordering::SeqCst) == 0 { "default" } else { "outOfOffice" }.into();
+            ResponseTemplate::new(200).set_body_json(reply)
+        }).expect(2).mount(&server).await;
+        Mock::given(method("PATCH")).respond_with(ResponseTemplate::new(412)).expect(1).mount(&server).await;
+        let result = update_via_client(&pool, "all", 1792123200000, ev, "primary", "America/New_York",
+            all_day_form("changed", "2026-10-16", "2026-10-17"), "none",
+            &omacal_google::CalendarClient::new(server.uri(), "test-token")).await;
+        assert_eq!(result.unwrap_err().to_string(), OOO_DATE_ONLY);
+        let sent = requests(&server).await;
+        assert_eq!(sent.iter().map(|r| r.method.as_str()).collect::<Vec<_>>(), vec!["GET", "PATCH", "GET"],
+            "only the first conditional PATCH (rejected by 412) may precede discovery; no retry/create/delete/move");
+        let (cached, _, _) = omacal_store::event_by_id(&pool, 1).await.unwrap().unwrap();
+        assert!(!cached.is_all_day);
+        assert_eq!((cached.start_utc, cached.end_utc), (1792123200000, 1792209600000));
+    }
+
+    #[tokio::test]
+    async fn allowed_ooo_edits_keep_native_times_and_omit_type_and_auto_decline_properties() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::method;
+        for moved in [false, true] {
+            let server = MockServer::start().await;
+            let mut wire = wire_occurrence("ooo", 1792123200000, 1792555200000, "ooo-etag");
+            wire["summary"] = "OOO".into();
+            wire["eventType"] = "outOfOffice".into();
+            wire["outOfOfficeProperties"] = serde_json::json!({"autoDeclineMode": "declineAllConflictingInvitations"});
+            wire["start"]["timeZone"] = "America/New_York".into();
+            wire["end"]["timeZone"] = "America/New_York".into();
+            let parsed = serde_json::from_value(wire.clone()).unwrap();
+            let mut ev = omacal_sync::to_stored(&parsed, 1, "America/New_York").unwrap();
+            let (pool, id) = seeded_pool_on_cal(&mut ev, "America/New_York").await;
+            let delta = if moved { HOUR } else { 0 };
+            wire["start"]["dateTime"] = omacal_sync::to_rfc3339(ev.start_utc + delta).into();
+            wire["end"]["dateTime"] = omacal_sync::to_rfc3339(ev.end_utc + delta).into();
+            wire["summary"] = "OOO (booked)".into();
+            Mock::given(method("PATCH")).respond_with(ResponseTemplate::new(200).set_body_json(wire)).expect(1).mount(&server).await;
+            let after = form("OOO (booked)", ev.start_utc + delta, ev.end_utc + delta);
+            update_via_client(&pool, "all", ev.start_utc, ev, "primary", "America/New_York", after, "none",
+                &omacal_google::CalendarClient::new(server.uri(), "test-token")).await.unwrap();
+            let sent = requests(&server).await;
+            assert_eq!(sent.len(), 1);
+            let body = patch_body(&sent);
+            assert!(body.get("eventType").is_none() && body.get("outOfOfficeProperties").is_none());
+            assert_eq!(body["summary"], "OOO (booked)");
+            if moved {
+                assert!(body["start"]["dateTime"].is_string() && body["end"]["dateTime"].is_string());
+                assert!(body["start"].get("date").is_none());
+            } else {
+                assert!(body.get("start").is_none() && body.get("end").is_none(), "title-only must not retime OOO");
+            }
+            let (cached, _, _) = omacal_store::event_by_id(&pool, id).await.unwrap().unwrap();
+            assert!(!cached.is_all_day);
+            assert_eq!(cached.google_event_type.as_deref(), Some("outOfOffice"));
+            assert_eq!((cached.start_utc, cached.end_utc), (1792123200000 + delta, 1792555200000 + delta));
+            assert_eq!(cached.presentation(omacal_core::Interval { start_ms: cached.start_utc, end_ms: cached.end_utc }).is_all_day(), !moved);
+        }
     }
 
     /// The defect this whole design guards against. "This one" must patch the
@@ -6712,6 +7103,16 @@ mod tests {
     /// All-day resolves against the *calendar's* zone (Google sends a bare
     /// `date` with no zone of its own), so the calendar here is the New York
     /// one and the event's stored `start_tz` is left elsewhere on purpose.
+    async fn mount_default_all_day_master(server: &wiremock::MockServer) {
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/calendars/cal%40x.com/events/master1"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "master1", "status": "confirmed", "etag": "\"master-1\"", "eventType": "default",
+                "summary": "Standup", "recurrence": ["RRULE:FREQ=WEEKLY"],
+                "start": {"date": "2026-02-07"}, "end": {"date": "2026-02-08"}
+            }))).expect(1).mount(server).await;
+    }
+
     #[tokio::test]
     async fn a_title_only_all_day_edit_across_a_fall_back_still_sends_no_dates() {
         let mut ev = weekly_master("RRULE:FREQ=WEEKLY");
@@ -6740,6 +7141,7 @@ mod tests {
         // right date or wrong — fails to match, and the unmatched request is
         // answered with a bare 404 that fails the `unwrap` below as well.
         let server = wiremock::MockServer::start().await;
+        mount_default_all_day_master(&server).await;
         wiremock::Mock::given(wiremock::matchers::method("PATCH"))
             .and(wiremock::matchers::path("/calendars/cal%40x.com/events/master1"))
             .and(wiremock::matchers::body_json(
@@ -6799,6 +7201,7 @@ mod tests {
         });
 
         let server = wiremock::MockServer::start().await;
+        mount_default_all_day_master(&server).await;
         wiremock::Mock::given(wiremock::matchers::method("PATCH"))
             .and(wiremock::matchers::path("/calendars/cal%40x.com/events/master1"))
             .and(wiremock::matchers::body_json(expected))
@@ -8712,6 +9115,11 @@ mod tests {
         let (pool, _id) = seeded_pool_on_cal(&mut ev, "UTC").await;
 
         let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/calendars/cal%40x.com/events/ev1"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                wire_occurrence("ev1", OCCURRENCE, OCCURRENCE + HOUR, "\"e1\""),
+            )).expect(1).mount(&server).await;
         wiremock::Mock::given(wiremock::matchers::method("PATCH"))
             .and(wiremock::matchers::path("/calendars/cal%40x.com/events/ev1"))
             .and(wiremock::matchers::body_json(serde_json::json!({"summary": "Brunch"})))
@@ -8741,7 +9149,9 @@ mod tests {
         .unwrap();
 
         let sent = requests(&server).await;
-        assert_eq!(sent.len(), 1, "a one-off split fetched or created something: {sent:?}");
+        assert_eq!(methods_and_paths(&sent), vec![
+            "GET /calendars/cal%40x.com/events/ev1", "PATCH /calendars/cal%40x.com/events/ev1",
+        ], "a one-off following edit validates type but never looks up instances or splits");
     }
 
     /// The guard ordering, for the scope this task adds. `update_impl` reads
@@ -9014,6 +9424,37 @@ mod tests {
     /// other assertion here. The `received_requests` check is the one that
     /// catches it, and the `PATCH` expectation is what catches the mirror image
     /// — a truncation that never went out at all.
+    #[tokio::test]
+    async fn ooo_following_deletion_keeps_the_native_timed_until_and_provider_identity() {
+        let mut ev = weekly_master("RRULE:FREQ=WEEKLY");
+        ev.google_event_type = Some("outOfOffice".into());
+        let (pool, id) = seeded_pool_on_cal(&mut ev, "UTC").await;
+        let server = wiremock::MockServer::start().await;
+        let mut fresh = wire_master(&["RRULE:FREQ=WEEKLY"]);
+        fresh["eventType"] = "outOfOffice".into();
+        let mut shortened = wire_shortened_master(&[UNTIL_BEFORE_OCCURRENCE]);
+        shortened["eventType"] = "outOfOffice".into();
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(MASTER_PATH))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(fresh))
+            .expect(1).mount(&server).await;
+        wiremock::Mock::given(wiremock::matchers::method("PATCH"))
+            .and(wiremock::matchers::path(MASTER_PATH))
+            .and(wiremock::matchers::header("if-match", "\"m1\""))
+            .and(wiremock::matchers::body_json(serde_json::json!({"recurrence": [UNTIL_BEFORE_OCCURRENCE]})))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(shortened))
+            .expect(1).mount(&server).await;
+        delete_via_client(&pool, "following", OCCURRENCE, ev, "cal@x.com", "UTC",
+            &omacal_google::CalendarClient::new(server.uri(), "test")).await.unwrap();
+        let sent = requests(&server).await;
+        assert_eq!(sent.iter().map(|r| r.method.as_str()).collect::<Vec<_>>(), vec!["GET", "PATCH"]);
+        assert_eq!(patch_body(&sent), serde_json::json!({"recurrence": [UNTIL_BEFORE_OCCURRENCE]}));
+        let (row, _, _) = omacal_store::event_by_id(&pool, id).await.unwrap().unwrap();
+        assert_eq!(row.google_event_type.as_deref(), Some("outOfOffice"));
+        assert!(!row.is_all_day);
+        assert_eq!(row.recurrence.as_deref(), Some(UNTIL_BEFORE_OCCURRENCE));
+    }
+
     #[tokio::test]
     async fn deleting_following_truncates_and_never_issues_a_delete() {
         let mut ev = weekly_master("RRULE:FREQ=WEEKLY");

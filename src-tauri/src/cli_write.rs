@@ -885,24 +885,7 @@ pub(crate) async fn execute(pool: &SqlitePool, cmd: &WriteCmd, json: bool) -> i3
             // exactly what the form seeds before the user types.
             let occ_start = args.occurrence;
             let occ_end = occ_start + (t.end_ms - t.start_ms);
-            let stamp = |ms: i64| -> Result<(String, String), String> {
-                let z = jiff::Timestamp::from_millisecond(ms)
-                    .map_err(|e| e.to_string())?
-                    .to_zoned(tz.clone());
-                Ok((z.date().to_string(), z.strftime("%H:%M").to_string()))
-            };
-            let ((cur_date, cur_start), (_, cur_end)) =
-                match (stamp(occ_start), stamp(occ_end)) {
-                    (Ok(a), Ok(b)) => (a, b),
-                    (Err(m), _) | (_, Err(m)) => return refuse(&m),
-                };
-            let when = match timed_when(
-                args.date.as_deref().unwrap_or(&cur_date),
-                args.start.as_deref().unwrap_or(&cur_start),
-                args.end.as_deref().unwrap_or(&cur_end),
-                None,
-                &tz,
-            ) {
+            let when = match update_when(args, occ_start, occ_end, &tz) {
                 Ok((s, e)) => serde_json::json!({ "kind": "timed", "startMs": s, "endMs": e }),
                 Err(m) => return refuse(&m),
             };
@@ -973,6 +956,29 @@ pub(crate) async fn execute(pool: &SqlitePool, cmd: &WriteCmd, json: bool) -> i3
     };
 
     send(&request, json, done_word)
+}
+
+/// Derive explicit clock/date edits while keeping untouched native endpoints.
+fn update_when(args: &UpdateArgs, start: i64, end: i64, tz: &jiff::tz::TimeZone) -> Result<(i64, i64), String> {
+    // Descriptive edits preserve exact native instants (and repeated-hour
+    // identity), rather than rebuilding a multi-day event on its first day.
+    if args.date.is_none() && args.start.is_none() && args.end.is_none() {
+        return Ok((start, end));
+    }
+    let stamp = |ms: i64| -> Result<(String, String), String> {
+        let z = jiff::Timestamp::from_millisecond(ms).map_err(|e| e.to_string())?.to_zoned(tz.clone());
+        Ok((z.date().to_string(), z.strftime("%H:%M").to_string()))
+    };
+    let (cur_date, cur_start) = stamp(start)?;
+    let (cur_end_date, cur_end) = stamp(end)?;
+    let date = args.date.as_deref().unwrap_or(&cur_date);
+    let parse = |s: &str| s.parse::<jiff::civil::Date>().map_err(|_| "--date takes YYYY-MM-DD".to_string());
+    let day_span = parse(&cur_date)?.until(parse(&cur_end_date)?).map_err(|e| e.to_string())?;
+    let end_date = parse(date)?.checked_add(day_span).map_err(|e| e.to_string())?.to_string();
+    let (s, e) = timed_when(date, args.start.as_deref().unwrap_or(&cur_start),
+        args.end.as_deref().unwrap_or(&cur_end), Some(&end_date), tz)?;
+    Ok((if args.date.is_none() && args.start.is_none() { start } else { s },
+        if args.date.is_none() && args.end.is_none() { end } else { e }))
 }
 
 /// Sends one request to the running app and reports what came back.
@@ -1280,6 +1286,23 @@ mod tests {
                 "{provider} does not mail"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn an_ooo_cli_title_update_keeps_the_full_native_timed_interval() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        sqlx::query("INSERT INTO accounts (google_sub, email, created_at) VALUES ('ooo', 'me@x.test', 0)").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO calendars (account_id, google_id, summary, timezone, access_role) VALUES (1, 'me@x.test', 'Work', 'America/New_York', 'owner')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO events (calendar_id, google_id, google_event_type, summary, start_utc, end_utc, start_tz, end_tz, is_all_day, status, updated_at)
+                     VALUES (1, 'ooo', 'outOfOffice', 'OOO (🍂)', 1792123200000, 1792555200000, 'America/New_York', 'America/New_York', 0, 'confirmed', 0)").execute(&pool).await.unwrap();
+        let native = target(&pool, 1).await.unwrap();
+        assert!(!native.all_day, "presentation must not trigger the date-only CLI refusal");
+        let WriteCmd::Update(args) = parse("update", "1 --occurrence 1792123200000 --title Renamed").unwrap() else { panic!("update") };
+        let (start, end) = update_when(&args, args.occurrence, args.occurrence + native.end_ms - native.start_ms, &jiff::tz::TimeZone::UTC).unwrap();
+        assert_eq!((start, end), (1792123200000, 1792555200000));
+        let WriteCmd::Update(timed) = parse("update", "1 --occurrence 1792123200000 --start 05:00").unwrap() else { panic!("update") };
+        assert_eq!(update_when(&timed, native.start_ms, native.end_ms, &jiff::tz::TimeZone::UTC).unwrap(),
+            (1792126800000, 1792555200000), "changing one clock keeps the native end's date");
     }
 
     /// §4's notify rule: guests demand an answer, solitude implies none.

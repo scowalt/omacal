@@ -59,6 +59,8 @@ pub struct ScheduledEvent {
     /// this instant, not still running through it.
     pub occurrence_end_ms: i64,
     pub is_all_day: bool,
+    /// Read-only override for OOO wording, never used to anchor or schedule.
+    pub presentation_all_day: bool,
     /// Google's `reminders.useDefault`. When true the calendar's list applies
     /// and `overrides` is ignored; the two are alternatives, never additive.
     pub use_default_reminders: bool,
@@ -257,7 +259,7 @@ pub fn due_reminders(
                     title: ev.title.clone(),
                     location: ev.location.clone(),
                     conference_uri: ev.conference_uri.clone(),
-                    is_all_day: ev.is_all_day,
+                    is_all_day: ev.is_all_day || ev.presentation_all_day,
                 });
             }
         }
@@ -424,6 +426,7 @@ mod tests {
             occurrence_start_ms: T0900Z,
             occurrence_end_ms: T0900Z + HOUR,
             is_all_day: false,
+            presentation_all_day: false,
             use_default_reminders: false,
             overrides: reminders,
             calendar_defaults: Vec::new(),

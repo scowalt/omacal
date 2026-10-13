@@ -22,6 +22,7 @@ import type { TaskSort } from '../../src/lib/tasks';
 import type { EventCornerStyle } from '../../src/lib/appearance';
 import type { TemperatureUnit } from '../../src/lib/temperature';
 import { sliceWeek } from '../../src/lib/weekwindow';
+import { OOO } from '../ooo-fixtures';
 import {
   labelledWeek, weekLabel, APP_FIVE_MIN_AGO, APP_NOW, APP_SERIES_ID, APP_SERIES_OCCURRENCE,
   LOCAL_TASK_LIST, TASK_LISTS, TASKS, VISIBILITY_TASKS, TIMED_TASK, DONE_HISTORY, IMPORT_PLANS,
@@ -562,7 +563,7 @@ const DAY_MS = 24 * 3_600_000;
 type PadBuilder = (start: number, days: number) => WeekPayload;
 
 function padBuilder(scenario: string): PadBuilder | null {
-  if (scenario === 'writable' || scenario === 'cross-zone') return null;
+  if (scenario === 'writable' || scenario === 'cross-zone' || scenario.startsWith('ooo')) return null;
   if (scenario === 'keyboard-navigation') return (start, n) => sliceWeek(keyboardWeek(start), 0, n);
   return (start, n) => labelledWeek(start, n);
 }
@@ -960,6 +961,10 @@ export function installTauriStub(scenario: string): Harness {
    *  tell a saved setting from an ignored one. Five minutes and a one-minute
    *  floor are `sync_loop`'s own `DEFAULT_INTERVAL_MS`/`MIN_INTERVAL_MS`. */
   let settings = loadSettings();
+  if (scenario.startsWith('ooo')) {
+    responseData.week = structuredClone(scenario === 'ooo-dst' ? OOO.dstWeek : scenario === 'ooo-controls' ? OOO.controls : OOO.week);
+  }
+  let oooPartial = false;
 
   // Canned answers a page can arrive with, keyed by command — set before the
   // app mounts (`page.addInitScript`), since the app reads on mount. Used by
@@ -1090,7 +1095,7 @@ export function installTauriStub(scenario: string): Harness {
         // does: without one the form's calendar select has nothing to seed
         // from and Save refuses, so the edit half of its agreement spec could
         // never run.
-        if (scenario === 'writable' || scenario === 'cross-zone') return APP_WRITE_CALENDARS;
+        if (scenario === 'writable' || scenario === 'cross-zone' || scenario.startsWith('ooo')) return APP_WRITE_CALENDARS;
         // Stateful, so a spec can hide a calendar and see what is drawn after.
         if (scenario === 'task-visibility') return structuredClone(visibilityCalendars);
         if (scenario === 'uncoloured-lists') {
@@ -1339,9 +1344,18 @@ export function installTauriStub(scenario: string): Harness {
       case 'dismiss_all_change_notices':
         return 0;
       case 'event_detail':
-        return eventCallResult('event_detail', args.id);
-      case 'refresh_event':
-        return eventCallResult('refresh_event', args.id);
+      case 'refresh_event': {
+        if (scenario.startsWith('ooo')) {
+          if (scenario === 'ooo-dst') {
+            // Endpoint matching selects a Rust-produced occurrence. Omitting
+            // context really returns the master, so the integration can fail.
+            return structuredClone(OOO.dstDetails.find((d) => d.occurrence_start_ms === args.occurrenceStartMs
+              && d.occurrence_end_ms === args.occurrenceEndMs) ?? OOO.dstMaster);
+          }
+          return structuredClone(oooPartial ? OOO.partialDetail : OOO.detail);
+        }
+        return eventCallResult(cmd, args.id);
+      }
       case 'respond_to_event': {
         // Exposed so a spec can assert on exactly what `EventPopover` sent —
         // in particular, that the fourth argument is the clicked block's own
@@ -1399,6 +1413,30 @@ export function installTauriStub(scenario: string): Harness {
         }
         return CREATED_DETAIL;
       case 'update_event':
+        if (scenario === 'ooo') {
+          const finish = () => {
+            const when = args.fields.when;
+            // Pick among authoritative goldens for these two test edits;
+            // this is not a midnight/DST classifier.
+            oooPartial = when.startMs === OOO.partialDetail.start_ms && when.endMs === OOO.partialDetail.end_ms;
+            responseData.week = structuredClone(oooPartial ? OOO.partialWeek : OOO.week);
+            const title = args.fields.summary;
+            for (const e of [...responseData.week.all_day_events, ...responseData.week.days.flatMap((d) => d.events)]) {
+              if (e.id === args.id) e.title = title;
+            }
+            return { ...structuredClone(oooPartial ? OOO.partialDetail : OOO.detail), title };
+          };
+          if (holdWriteOnce === 'update_event') {
+            holdWriteOnce = null;
+            return new Promise((resolve, reject) => {
+              parkedWrite = { resolve: () => resolve(finish()), reject: (m) => reject(new Error(m)) };
+            });
+          }
+          if (failUpdateOnce !== null) {
+            const m = failUpdateOnce; failUpdateOnce = null; throw new Error(m);
+          }
+          return finish();
+        }
         if (holdWriteOnce === 'update_event') {
           holdWriteOnce = null;
           const answer = POPOVER_DETAILS[args.id] ?? CREATED_DETAIL;

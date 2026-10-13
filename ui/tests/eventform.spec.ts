@@ -594,11 +594,33 @@ const timedDetail = (startMs: number, endMs: number): EventDetail => ({
   id: 1, calendar_id: 1, title: 'Standup', description: null, location: null,
   conference_uri: null, start_ms: startMs, end_ms: endMs,
   start_date: null, end_date: null, is_all_day: false,
+  native_is_all_day: false, is_out_of_office: false,
+  occurrence_start_ms: null, occurrence_end_ms: null,
   is_recurring: false, is_series_exception: false, recurrence: null, repeat: 'never', weekly_days: [],
   repeat_end: { kind: 'never' }, color: null,
   organizer_email: null, self_response: null, can_respond: true, can_edit: true, is_organizer: true, guests_can_modify: false, mails_guests: true,
   attendees: [],
   reminders: { use_default: true, overrides: [] }, calendar_default_reminders: [],
+});
+
+test('OOO presentation opens and duplicates as exact native timed instants', async () => {
+  const { duplicatedValue } = await import('../src/lib/eventform');
+  const start = 1792123200000;
+  const end = 1792555200000;
+  const d: EventDetail = {
+    ...timedDetail(start, end), is_all_day: true, native_is_all_day: false,
+    is_out_of_office: true, start_date: '2026-10-16', end_date: '2026-10-20',
+    occurrence_start_ms: start, occurrence_end_ms: end,
+  };
+  const opened = valueFromDetail(d, start, end);
+  expect(opened.isAllDay).toBe(false);
+  expect(opened.sourceStartMs).toBe(start);
+  expect(opened.sourceEndMs).toBe(end);
+  expect(whenOf(opened)).toEqual({ kind: 'timed', startMs: start, endMs: end });
+  const duplicate = duplicatedValue(opened, blankValue(0, 1));
+  expect(duplicate.isEdit).toBe(false);
+  expect(duplicate.isAllDay).toBe(false);
+  expect(whenOf(duplicate)).toEqual({ kind: 'timed', startMs: start, endMs: end });
 });
 
 test.describe('a timed value is sent as the instants it was read off', () => {
@@ -1190,7 +1212,9 @@ const allDayDetail = (startDate: string, lastDate: string, startMs: number, endM
   id: 1, calendar_id: 1, title: 'Berlin trip', description: null, location: null,
   conference_uri: null, start_ms: startMs, end_ms: endMs,
   start_date: startDate, end_date: lastDate,
-  is_all_day: true, is_recurring: false, is_series_exception: false, recurrence: null, repeat: 'never', weekly_days: [],
+  is_all_day: true, native_is_all_day: true, is_out_of_office: false,
+  occurrence_start_ms: null, occurrence_end_ms: null,
+  is_recurring: false, is_series_exception: false, recurrence: null, repeat: 'never', weekly_days: [],
   repeat_end: { kind: 'never' }, color: null,
   organizer_email: null, self_response: null, can_respond: true, can_edit: true,
   attendees: [],

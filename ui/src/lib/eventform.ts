@@ -154,7 +154,9 @@ export type EventFormValue = {
    */
   sourceStartMs: number | null;
   sourceEndMs: number | null;
+  /** Native date-only editor mode; never copied from presentation. */
   isAllDay: boolean;
+  isOutOfOffice: boolean;
   location: string;
   description: string;
   /** The video call described by the form, kept separate from the place.
@@ -532,6 +534,9 @@ export type FormGhost =
  * exactly the moment the user was deciding about it (reported 2026-08-31).
  */
 export function previewGhost(value: EventFormValue, color: string | null): FormGhost | null {
+  // Native timed inputs cannot predict OOO routing. Keep the authoritative
+  // band/grid until reload, just like the saved edit's deferred timing.
+  if (value.isOutOfOffice) return null;
   if (value.isAllDay) {
     const firstDate = value.date;
     const lastDate = value.endDate || value.date;
@@ -747,6 +752,7 @@ export function blankValueAt(
     sourceStartMs: startMs,
     sourceEndMs: endMs,
     isAllDay: false,
+    isOutOfOffice: false,
     location: '',
     description: '',
     videoCall: null,
@@ -955,8 +961,17 @@ export function valueFromDetail(
   startMs: number,
   endMs: number,
 ): EventFormValue {
-  const displayedDate = detail.is_all_day
-    ? occurrenceDate(detail.start_date, detail.start_ms, startMs)
+  if (typeof detail.native_is_all_day !== 'boolean') {
+    throw new Error('an EventDetail must carry native timing');
+  }
+  startMs = detail.occurrence_start_ms ?? startMs;
+  endMs = detail.occurrence_end_ms ?? endMs;
+  const nativeAllDay = detail.native_is_all_day;
+  // Contextual dates have already been projected in Rust. ID-only details
+  // retain the old master-date adaptation for callers holding an occurrence.
+  const contextual = detail.occurrence_start_ms != null;
+  const displayedDate = nativeAllDay
+    ? occurrenceDate(detail.start_date, contextual ? startMs : detail.start_ms, startMs)
     : dateOf(startMs);
   const conferenceProvider = meetingProvider(detail.conference_uri);
   const locationUri = detail.conference_uri ? null : meetingUrl(detail.location);
@@ -984,14 +999,15 @@ export function valueFromDetail(
     // Inclusive on both arms, and inclusive already on the all-day one:
     // `end_date` is the last day a person would point at, worked out from the
     // exclusive `end_ms` once, on the Rust side, in the calendar's zone.
-    endDate: detail.is_all_day
-      ? occurrenceDate(detail.end_date, detail.end_ms, endMs)
+    endDate: nativeAllDay
+      ? occurrenceDate(detail.end_date, contextual ? endMs : detail.end_ms, endMs)
       : dateOf(endMs),
-    start: detail.is_all_day ? ALL_DAY_START : timeOf(startMs),
-    end: detail.is_all_day ? ALL_DAY_END : timeOf(endMs),
-    sourceStartMs: detail.is_all_day ? null : startMs,
-    sourceEndMs: detail.is_all_day ? null : endMs,
-    isAllDay: detail.is_all_day,
+    start: nativeAllDay ? ALL_DAY_START : timeOf(startMs),
+    end: nativeAllDay ? ALL_DAY_END : timeOf(endMs),
+    sourceStartMs: nativeAllDay ? null : startMs,
+    sourceEndMs: nativeAllDay ? null : endMs,
+    isAllDay: nativeAllDay,
+    isOutOfOffice: detail.is_out_of_office,
     location: detail.location ?? '',
     // Verbatim. Never through `sanitize.ts`: that module exists for *rendering*
     // a description, and running it here would put the stripped text into an
