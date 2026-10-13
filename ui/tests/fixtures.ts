@@ -492,6 +492,10 @@ const detail = (o: Partial<EventDetail> & { id: number }): EventDetail => ({
   start_date: null,
   end_date: null,
   is_all_day: false,
+  native_is_all_day: o.native_is_all_day ?? o.is_all_day ?? false,
+  is_out_of_office: false,
+  occurrence_start_ms: null,
+  occurrence_end_ms: null,
   is_recurring: false,
   // A master, not a detached occurrence. The RSVP path branches on this, so a
   // recurring fixture that means "one moved occurrence" must set it.

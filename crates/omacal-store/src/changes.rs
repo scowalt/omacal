@@ -269,6 +269,7 @@ mod tests {
             id: 0,
             calendar_id: 1,
             google_id: gid.into(),
+            google_event_type: None,
             summary: Some("NVP sync".into()),
             location: None,
             start_utc: start,
@@ -334,6 +335,9 @@ mod tests {
         let pool = seeded_pool().await;
         let mut mine = attended("mine", NOW + HOUR);
         mine.organizer_email = Some("me@x.com".into());
+        // Status events live on their owner's primary calendar, so their
+        // time changes are not incoming meeting news (including snapshots).
+        mine.google_event_type = Some("outOfOffice".into());
         upsert_event(&pool, &mine).await.unwrap();
         mine.start_utc = NOW + 5 * HOUR;
         mine.end_utc = NOW + 6 * HOUR;

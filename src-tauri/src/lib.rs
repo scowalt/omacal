@@ -1934,6 +1934,27 @@ mod tests {
         write("meta", serde_json::json!({ "now": now, "tz": tz, "weekStart": ms(monday), "year": year, "month": month }));
     }
 
+    #[tokio::test]
+    async fn an_ooo_at_the_ribbon_query_edge_is_not_dropped_by_instant_overlap() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        sqlx::query("INSERT INTO accounts (google_sub, email, created_at) VALUES ('ooo', 'me@x.test', 0)").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO calendars (account_id, google_id, summary, timezone, access_role) VALUES (1, 'me@x.test', 'Work', 'Pacific/Auckland', 'owner')").execute(&pool).await.unwrap();
+        let wire: omacal_google::model::Event = serde_json::from_value(serde_json::json!({
+            "id": "ooo-edge", "eventType": "outOfOffice", "summary": "OOO edge", "status": "confirmed",
+            "start": { "dateTime": "2025-12-29T00:00:00+14:00", "timeZone": "Pacific/Kiritimati" },
+            "end": { "dateTime": "2025-12-30T00:00:00+14:00", "timeZone": "Pacific/Kiritimati" }
+        })).unwrap();
+        let src = omacal_sync::to_stored(&wire, 1, "Pacific/Auckland").unwrap();
+        let start = commands::big_year_start_ms(2026, "Etc/GMT+12", settings::WeekStart::Monday);
+        assert_eq!(write::date_in_zone(start, "Etc/GMT+12"), "2025-12-29");
+        assert!(src.end_utc < start, "native intervals do not overlap the ribbon");
+        omacal_store::upsert_event(&pool, &src).await.unwrap();
+        let big = get_big_year_impl(&pool, 2026, "Etc/GMT+12", start, settings::WeekStart::Monday).await.unwrap();
+        assert_eq!(big.rows[0].pill_events.len(), 1);
+        assert_eq!((big.rows[0].pills[0].start_col, big.rows[0].pills[0].end_col), (0, 0));
+        assert_eq!(big.rows[0].pill_events[0].all_day_dates, Some(("2025-12-29".into(), "2025-12-29".into())));
+    }
+
     /// The hook's value goes, a person's stays, and outside an AppImage the
     /// environment is not touched at all — a `GTK_THEME` there is somebody's
     /// own choice, whatever it says.

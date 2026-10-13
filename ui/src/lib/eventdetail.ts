@@ -54,7 +54,13 @@ export type EventDetail = {
    * — a single-day event reports the same date twice.
    */
   end_date: string | null;
+  /** Read-facing presentation, not the provider's format. */
   is_all_day: boolean;
+  native_is_all_day: boolean;
+  is_out_of_office: boolean;
+  /** Actual interval being described; null on ID-only/master reads. */
+  occurrence_start_ms: number | null;
+  occurrence_end_ms: number | null;
   is_recurring: boolean;
   /** Whether this is a **materialised exception** — one occurrence its
    *  organizer detached from the series — rather than the series master.
@@ -113,7 +119,12 @@ export type EventDetail = {
   calendar_default_reminders: { method: string; minutes: number }[];
 };
 
-export const getEventDetail = (id: number) => invoke<EventDetail>('event_detail', { id });
+type DetailContext = [] | [startMs: number, endMs: number];
+const detailArgs = (id: number, context: DetailContext) => ({
+  id, ...(context.length === 2 ? { occurrenceStartMs: context[0], occurrenceEndMs: context[1] } : {}),
+});
+export const getEventDetail = (id: number, ...context: DetailContext) =>
+  invoke<EventDetail>('event_detail', detailArgs(id, context));
 
 /**
  * Who a change to this event reaches — the fact the move and save dialogs
@@ -237,7 +248,8 @@ export type WhenInput =
 
 /** A freshness check on an already-open popover, not a load — see `WeekGrid`,
  *  which fires this after paint and ignores a rejection. */
-export const refreshEvent = (id: number) => invoke<EventDetail>('refresh_event', { id });
+export const refreshEvent = (id: number, ...context: DetailContext) =>
+  invoke<EventDetail>('refresh_event', detailArgs(id, context));
 
 /**
  * Queue replies made in this window in order, sharing identical pending
@@ -330,8 +342,9 @@ export const updateEvent = (
    *  can send its picker's value unconditionally. A drag never re-files
    *  anything and passes `null`. */
   targetCalendarId: number | null = null,
+  occurrenceEndMs?: number,
 ) => invoke<EventDetail>('update_event', {
-  id, scope, occurrenceStartMs, fields, sendUpdates, targetCalendarId,
+  id, scope, occurrenceStartMs, fields, sendUpdates, targetCalendarId, occurrenceEndMs,
 });
 
 /**

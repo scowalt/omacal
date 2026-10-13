@@ -32,8 +32,10 @@ const EXPAND_LIMIT: u16 = 512;
 #[derive(Debug, Clone, Serialize)]
 pub struct UiEvent {
     pub calendar_id: i64,
-    #[serde(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub all_day_dates: Option<(String, String)>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub is_out_of_office: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub copies: Vec<crate::combined::EventCopy>,
     pub id: i64,
@@ -136,9 +138,11 @@ pub struct MonthPayload {
 }
 
 pub(crate) fn to_ui(src: &StoredEvent, start_ms: i64, end_ms: i64) -> UiEvent {
+    let shown = src.presentation(Interval { start_ms, end_ms });
     UiEvent {
         calendar_id: src.calendar_id,
-        all_day_dates: src.is_all_day.then(|| crate::write::all_day_span_dates(start_ms, end_ms, &src.calendar_timezone)),
+        all_day_dates: shown.inclusive_dates(),
+        is_out_of_office: src.is_out_of_office(),
         copies: Vec::new(),
         id: src.id,
         title: src.summary.clone().unwrap_or_else(|| "(no title)".into()),
@@ -150,7 +154,7 @@ pub(crate) fn to_ui(src: &StoredEvent, start_ms: i64, end_ms: i64) -> UiEvent {
             .clone()
             .unwrap_or_else(|| DEFAULT_EVENT_COLOR.into()),
         response: src.self_response.clone().unwrap_or_else(|| "accepted".into()),
-        is_all_day: src.is_all_day,
+        is_all_day: shown.is_all_day(),
         attendees: src.attendees.len() as u32,
         recurring: src.recurrence.is_some() || src.recurring_event_id.is_some(),
         conference: src.conference_uri.clone(),
@@ -226,6 +230,31 @@ pub(crate) fn occurrences_limited(
             Vec::new()
         }
     }
+}
+
+/// Read windows are civil-date windows for qualifying OOO, but instant
+/// windows for everything else. Fetch outside candidates separately so the
+/// padding cannot consume the expansion cap before the real window begins.
+/// This does not change any recurrence endpoint or the scheduler's expansion.
+pub(crate) fn display_occurrences(src: &StoredEvent, from_ms: i64, to_ms: i64, tz: &str) -> Vec<Interval> {
+    let mut intervals = occurrences(src, from_ms, to_ms);
+    if !src.is_out_of_office() || src.is_all_day || from_ms >= to_ms {
+        return intervals;
+    }
+    const PAD: i64 = 2 * DAY_MS; // exceeds the difference between IANA offsets
+    for (from, to) in [(from_ms.saturating_sub(PAD), from_ms), (to_ms, to_ms.saturating_add(PAD))] {
+        intervals.extend(occurrences(src, from, to).into_iter()
+            .filter(|iv| iv.start_ms >= to_ms || iv.end_ms <= from_ms));
+    }
+    let first = crate::write::date_in_zone(from_ms, tz);
+    let last = crate::write::date_in_zone(to_ms.saturating_sub(1), tz);
+    intervals.retain(|iv| match src.presentation(*iv).inclusive_dates() {
+        Some((start, end)) => start <= last && end >= first,
+        None => iv.start_ms < to_ms && iv.end_ms > from_ms,
+    });
+    intervals.sort_by_key(|iv| (iv.start_ms, iv.end_ms));
+    intervals.dedup_by_key(|iv| (iv.start_ms, iv.end_ms));
+    intervals
 }
 
 /// The `n + 1` local-midnight boundaries starting at `start_ms`, computed
@@ -426,8 +455,8 @@ fn date_column(col_dates: &[String], date: &str) -> i32 {
 /// popover and the edit form read, so the day a chip is drawn under and the day
 /// the event says it is on cannot drift apart.
 fn all_day_columns(src: &StoredEvent, iv: &Interval, col_dates: &[String]) -> (i32, i32) {
-    let (start_date, last_date) =
-        crate::write::all_day_span_dates(iv.start_ms, iv.end_ms, &src.calendar_timezone);
+    let (start_date, last_date) = src.presentation(*iv).inclusive_dates()
+        .expect("only presentation-all-day intervals have civil dates");
     (date_column(col_dates, &start_date), date_column(col_dates, &last_date))
 }
 
@@ -464,13 +493,13 @@ pub fn assemble_days_combining(events: &[StoredEvent], start_ms: i64, n: usize, 
         if src.status == "cancelled" {
             continue;
         }
-        for iv in occurrences(src, bounds[0], end_ms) {
+        for iv in display_occurrences(src, bounds[0], end_ms, tz) {
             // Only a master can match: the keys are master ids, and an
             // exception never carries its own id as its master.
             if suppressed.contains(&(src.calendar_id, src.google_id.as_str(), iv.start_ms)) {
                 continue;
             }
-            if src.is_all_day {
+            if src.presentation(iv).is_all_day() {
                 let (start_col, end_col) = all_day_columns(src, &iv, &col_dates);
                 segments.push(Segment { idx: all_day_events.len(), start_col, end_col });
                 all_day_events.push(to_ui(src, iv.start_ms, iv.end_ms));
@@ -581,11 +610,11 @@ pub fn assemble_month_combining(
                 if src.status == "cancelled" {
                     continue;
                 }
-                for iv in occurrences(src, row_start, row_end) {
+                for iv in display_occurrences(src, row_start, row_end, tz) {
                     if suppressed.contains(&(src.calendar_id, src.google_id.as_str(), iv.start_ms)) {
                         continue;
                     }
-                    if src.is_all_day {
+                    if src.presentation(iv).is_all_day() {
                         let (start_col, end_col) = all_day_columns(src, &iv, row_dates);
                         segments.push(Segment { idx: bar_events.len(), start_col, end_col });
                         bar_events.push(to_ui(src, iv.start_ms, iv.end_ms));
@@ -714,18 +743,16 @@ pub fn assemble_year(
                 }
                 // Only all-day events dot the year grid — a timed meeting is
                 // not "blocked out"; this view answers what *is*.
-                if !src.is_all_day {
+                if !src.is_all_day && !src.is_out_of_office() {
                     continue;
                 }
-                for iv in occurrences(src, bounds[0], bounds[days_in_month]) {
+                for iv in display_occurrences(src, bounds[0], bounds[days_in_month], tz) {
                     if suppressed.contains(&(src.calendar_id, src.google_id.as_str(), iv.start_ms)) {
                         continue;
                     }
-                    let (first_date, last_date) = crate::write::all_day_span_dates(
-                        iv.start_ms,
-                        iv.end_ms,
-                        &src.calendar_timezone,
-                    );
+                    let Some((first_date, last_date)) = src.presentation(iv).inclusive_dates() else {
+                        continue;
+                    };
                     for (dotted, day_date) in has_all_day.iter_mut().zip(&day_dates) {
                         if day_date.as_str() >= first_date.as_str()
                             && day_date.as_str() <= last_date.as_str()
@@ -870,11 +897,11 @@ pub fn assemble_big_year_combining(
                 if src.status == "cancelled" {
                     continue;
                 }
-                for iv in occurrences(src, row_start, row_end) {
+                for iv in display_occurrences(src, row_start, row_end, tz) {
                     if suppressed.contains(&(src.calendar_id, src.google_id.as_str(), iv.start_ms)) {
                         continue;
                     }
-                    if src.is_all_day {
+                    if src.presentation(iv).is_all_day() {
                         let (start_col, end_col) = all_day_columns(src, &iv, row_dates);
                         segments.push(Segment { idx: pill_events.len(), start_col, end_col });
                         pill_events.push(to_ui(src, iv.start_ms, iv.end_ms));
@@ -951,7 +978,7 @@ mod tests {
 
     fn ev(gid: &str, start: i64, end: i64, all_day: bool) -> omacal_store::StoredEvent {
         omacal_store::StoredEvent {
-            id: 0, calendar_id: 1, google_id: gid.into(), summary: Some(gid.into()),
+            id: 0, calendar_id: 1, google_id: gid.into(), google_event_type: None, summary: Some(gid.into()),
             location: None, start_utc: start, end_utc: end,
             start_tz: "UTC".into(), end_tz: "UTC".into(),
             is_all_day: all_day, recurrence: None,
@@ -973,6 +1000,94 @@ mod tests {
         let week = assemble_days(&[source], MON, 1, "UTC");
         let wire = serde_json::to_value(&week).unwrap();
         assert_eq!(wire["days"][0]["events"][0]["calendar_id"], 42);
+    }
+
+    #[test]
+    fn ooo_uses_event_dates_in_bands_bars_and_year_dots_but_keeps_native_timing() {
+        let mut ooo = ev("OOO (🍂)", 1792123200000, 1792555200000, false);
+        ooo.google_event_type = Some("outOfOffice".into());
+        ooo.start_tz = "America/New_York".into();
+        ooo.calendar_timezone = "Pacific/Auckland".into();
+        let ordinary = ev("ordinary", 1792123200000, 1792555200000, false);
+        let start = "2026-10-12T00:00:00Z".parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        let events = vec![ooo.clone(), ordinary];
+        let days = assemble_days(&events, start, 10, "UTC");
+        assert_eq!(days.all_day_events.len(), 1);
+        assert!(days.all_day_events[0].is_all_day);
+        assert_eq!(days.all_day_events[0].all_day_dates, Some(("2026-10-16".into(), "2026-10-20".into())));
+        assert_eq!((days.all_day[0].start_col, days.all_day[0].end_col), (4, 8));
+        assert!(days.days.iter().flat_map(|d| &d.events).all(|e| e.title == "ordinary"));
+        let month = assemble_month(&events, 2026, 10, "UTC", crate::settings::WeekStart::Monday);
+        assert!(month.rows.iter().flat_map(|r| &r.bar_events).all(|e| e.title == "OOO (🍂)" && e.is_all_day));
+        assert_eq!(month.rows.iter().map(|r| r.bars.len()).sum::<usize>(), 2);
+        let year = assemble_year(&events, 2026, start, "UTC", crate::settings::WeekStart::Monday);
+        assert_eq!(year.months[9].days.iter().filter(|d| d.has_all_day).map(|d| d.day).collect::<Vec<_>>(), vec![16, 17, 18, 19, 20]);
+        let ribbon = assemble_big_year(&events, 2026, start, "UTC", crate::settings::WeekStart::Monday);
+        assert_eq!(ribbon.rows.iter().map(|r| r.pills.len()).sum::<usize>(), 1);
+        assert!(ribbon.rows.iter().flat_map(|r| &r.pill_events).all(|e| e.is_all_day));
+        assert!(!ooo.is_all_day);
+        assert_eq!((ooo.start_utc, ooo.end_utc), (1792123200000, 1792555200000));
+    }
+
+    #[test]
+    fn an_ooo_moved_exception_uses_its_own_interval_and_suppresses_the_dst_slot() {
+        let ms = |s: &str| s.parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        let mut master = ev("OOO series", ms("2026-03-07T00:00:00-05:00"), ms("2026-03-08T00:00:00-05:00"), false);
+        master.id = 11;
+        master.google_id = "ooo-series".into();
+        master.google_event_type = Some("outOfOffice".into());
+        master.start_tz = "America/New_York".into();
+        master.recurrence = Some("RRULE:FREQ=DAILY;COUNT=3".into());
+        let mut moved = master.clone();
+        moved.id = 12;
+        moved.google_id = "ooo-moved".into();
+        moved.recurrence = None;
+        moved.recurring_event_id = Some(master.google_id.clone());
+        moved.original_start_utc = Some(ms("2026-03-08T00:00:00-05:00"));
+        moved.start_utc = ms("2026-03-10T00:00:00-04:00");
+        moved.end_utc = ms("2026-03-11T00:00:00-04:00");
+        let start = ms("2026-03-07T00:00:00Z");
+        let alone = assemble_days(&[master.clone()], start, 5, "UTC");
+        assert_eq!(alone.days.iter().flat_map(|d| &d.events).count(), 2, "the fixed-duration DST interval crosses two viewer days");
+        let grid = assemble_days(&[master, moved.clone()], start, 5, "UTC");
+        assert!(grid.days.iter().all(|d| d.events.is_empty()), "the original non-midnight DST slot must not survive the exception");
+        assert_eq!(grid.all_day_events.iter().map(|e| (e.id, e.all_day_dates.clone())).collect::<Vec<_>>(), vec![
+            (11, Some(("2026-03-07".into(), "2026-03-07".into()))),
+            (11, Some(("2026-03-09".into(), "2026-03-09".into()))),
+            (12, Some(("2026-03-10".into(), "2026-03-10".into()))),
+        ]);
+        assert_eq!((grid.all_day_events[2].start_ms, grid.all_day_events[2].end_ms), (moved.start_utc, moved.end_utc));
+        assert!(!moved.is_all_day);
+    }
+
+    #[test]
+    fn combined_ooo_civil_spans_keep_each_copys_native_instants() {
+        let ms = |s: &str| s.parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        let mut a = ev("OOO (🍂)", 1792123200000, 1792555200000, false);
+        a.id = 11;
+        a.google_event_type = Some("outOfOffice".into());
+        a.start_tz = "America/New_York".into();
+        a.calendar_timezone = "Pacific/Auckland".into();
+        let mut b = a.clone();
+        b.id = 12;
+        b.calendar_id = 2;
+        b.start_tz = "Pacific/Auckland".into();
+        b.start_utc = ms("2026-10-16T00:00:00+13:00");
+        b.end_utc = ms("2026-10-21T00:00:00+13:00");
+        let start = ms("2026-10-12T00:00:00Z");
+        let grid = assemble_days_combining(&[a.clone(), b.clone()], start, 10, "UTC", true);
+        assert!(grid.days.iter().all(|d| d.events.is_empty()));
+        assert_eq!(grid.all_day_events.len(), 1);
+        assert_eq!(grid.all_day.len(), 1);
+        assert_eq!(grid.all_day_events[0].all_day_dates, Some(("2026-10-16".into(), "2026-10-20".into())));
+        assert_eq!(grid.all_day_events[0].copies.iter().map(|c| (c.id, c.start_ms, c.end_ms)).collect::<Vec<_>>(),
+            vec![(11, a.start_utc, a.end_utc), (12, b.start_utc, b.end_utc)]);
+        let month = assemble_month_combining(&[a.clone(), b.clone()], 2026, 10, "UTC", crate::settings::WeekStart::Monday, true);
+        assert!(month.rows.iter().flat_map(|r| &r.bar_events).all(|e| e.copies.len() == 2));
+        assert_eq!(month.rows.iter().map(|r| r.bars.len()).sum::<usize>(), 2);
+        let ribbon = assemble_big_year_combining(&[a, b], 2026, start, "UTC", crate::settings::WeekStart::Monday, true);
+        assert_eq!(ribbon.rows.iter().map(|r| r.pills.len()).sum::<usize>(), 1);
+        assert_eq!(ribbon.rows.iter().flat_map(|r| &r.pill_events).next().unwrap().copies.len(), 2);
     }
 
     #[test]
@@ -2631,7 +2746,7 @@ mod all_guests_declined_tests {
 
     fn with(attendees: Vec<Attendee>) -> bool {
         let mut src = omacal_store::StoredEvent {
-            id: 1, calendar_id: 1, google_id: "g".into(), summary: Some("Meeting".into()),
+            id: 1, calendar_id: 1, google_id: "g".into(), google_event_type: None, summary: Some("Meeting".into()),
             location: None, start_utc: 0, end_utc: 3_600_000,
             start_tz: "UTC".into(), end_tz: "UTC".into(),
             is_all_day: false, recurrence: None,

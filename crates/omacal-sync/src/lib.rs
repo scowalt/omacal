@@ -364,7 +364,7 @@ mod tests {
 
     fn stored(gid: &str, start: i64, end: i64) -> omacal_store::StoredEvent {
         omacal_store::StoredEvent {
-            id: 0, calendar_id: 1, google_id: gid.into(), summary: Some("Standup".into()),
+            id: 0, calendar_id: 1, google_id: gid.into(), google_event_type: None, summary: Some("Standup".into()),
             location: None, start_utc: start, end_utc: end,
             start_tz: "Europe/Sofia".into(), end_tz: "Europe/Sofia".into(),
             is_all_day: false, recurrence: None,
@@ -387,6 +387,33 @@ mod tests {
             }],
             "nextSyncToken": token
         })
+    }
+
+    #[tokio::test]
+    async fn out_of_office_sync_keeps_type_and_native_timing_across_upserts() {
+        let pool = seeded_pool().await;
+        let server = MockServer::start().await;
+        let client = CalendarClient::new(server.uri(), "test-token");
+        for kind in ["outOfOffice", "futureProviderType"] {
+            server.reset().await;
+            Mock::given(method("GET")).and(path("/calendars/primary/events"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "items": [{
+                        "id": "ooo-display-regression", "status": "confirmed", "summary": "OOO (🍂)",
+                        "eventType": kind,
+                        "start": {"dateTime": "2026-10-16T00:00:00-04:00", "timeZone": "America/New_York"},
+                        "end": {"dateTime": "2026-10-21T00:00:00-04:00", "timeZone": "America/New_York"}
+                    }], "nextSyncToken": "ooo-token"
+                }))).mount(&server).await;
+            sync_calendar(&pool, &client, 1, "primary", 0, 9_999_999_999_999).await.unwrap();
+            let rows = omacal_store::events_in_window(&pool, 1792123200000, 1792555200000).await.unwrap();
+            assert_eq!(rows.len(), 1);
+            let (row, _, _) = omacal_store::event_by_id(&pool, rows[0].id).await.unwrap().unwrap();
+            assert_eq!(row.google_event_type.as_deref(), Some(kind));
+            assert!(!row.is_all_day, "presentation must not alter native timing");
+            assert_eq!((row.start_utc, row.end_utc), (1792123200000, 1792555200000));
+            assert_eq!(row.start_tz, "America/New_York");
+        }
     }
 
     #[tokio::test]

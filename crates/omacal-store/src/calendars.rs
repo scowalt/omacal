@@ -532,7 +532,7 @@ mod tests {
 
     fn ev(cal: i64, gid: &str) -> StoredEvent {
         StoredEvent {
-            id: 0, calendar_id: cal, google_id: gid.into(), summary: Some("x".into()),
+            id: 0, calendar_id: cal, google_id: gid.into(), google_event_type: None, summary: Some("x".into()),
             location: None, start_utc: 1000, end_utc: 2000,
             start_tz: "UTC".into(), end_tz: "UTC".into(), is_all_day: false,
             recurrence: None, recurring_event_id: None, original_start_utc: None,

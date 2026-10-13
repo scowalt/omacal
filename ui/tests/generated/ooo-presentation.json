@@ -1,0 +1,727 @@
+{
+  "controls": {
+    "all_day": [
+      {
+        "cont_left": true,
+        "cont_right": false,
+        "end_col": 1,
+        "idx": 0,
+        "lane": 0,
+        "start_col": 0
+      },
+      {
+        "cont_left": false,
+        "cont_right": false,
+        "end_col": 0,
+        "idx": 1,
+        "lane": 1,
+        "start_col": 0
+      }
+    ],
+    "all_day_events": [
+      {
+        "all_day_dates": [
+          "2026-10-16",
+          "2026-10-20"
+        ],
+        "all_guests_declined": false,
+        "attendees": 0,
+        "calendar_id": 1,
+        "color": "#5b8def",
+        "conference": null,
+        "end_ms": 1792555200000,
+        "id": 1,
+        "is_all_day": true,
+        "is_out_of_office": true,
+        "location": null,
+        "recurring": false,
+        "response": "needsAction",
+        "start_ms": 1792123200000,
+        "title": "OOO (🍂)"
+      },
+      {
+        "all_day_dates": [
+          "2026-10-19",
+          "2026-10-19"
+        ],
+        "all_guests_declined": false,
+        "attendees": 0,
+        "calendar_id": 1,
+        "color": "#5b8def",
+        "conference": null,
+        "end_ms": 1792407600000,
+        "id": 502,
+        "is_all_day": true,
+        "location": null,
+        "recurring": false,
+        "response": "needsAction",
+        "start_ms": 1792321200000,
+        "title": "Native date-only control"
+      }
+    ],
+    "days": [
+      {
+        "end_ms": 1792454400000,
+        "events": [
+          {
+            "all_guests_declined": false,
+            "attendees": 0,
+            "calendar_id": 1,
+            "color": "#5b8def",
+            "conference": null,
+            "end_ms": 1792555200000,
+            "id": 501,
+            "is_all_day": false,
+            "location": null,
+            "recurring": false,
+            "response": "needsAction",
+            "start_ms": 1792123200000,
+            "title": "OOO unknown-type control"
+          }
+        ],
+        "placed": [
+          {
+            "column": 0,
+            "columns": 1,
+            "height": 1.0,
+            "idx": 0,
+            "top": 0.0
+          }
+        ],
+        "start_ms": 1792368000000
+      },
+      {
+        "end_ms": 1792540800000,
+        "events": [
+          {
+            "all_guests_declined": false,
+            "attendees": 0,
+            "calendar_id": 1,
+            "color": "#5b8def",
+            "conference": null,
+            "end_ms": 1792555200000,
+            "id": 501,
+            "is_all_day": false,
+            "location": null,
+            "recurring": false,
+            "response": "needsAction",
+            "start_ms": 1792123200000,
+            "title": "OOO unknown-type control"
+          }
+        ],
+        "placed": [
+          {
+            "column": 0,
+            "columns": 1,
+            "height": 1.0,
+            "idx": 0,
+            "top": 0.0
+          }
+        ],
+        "start_ms": 1792454400000
+      },
+      {
+        "end_ms": 1792627200000,
+        "events": [
+          {
+            "all_guests_declined": false,
+            "attendees": 0,
+            "calendar_id": 1,
+            "color": "#5b8def",
+            "conference": null,
+            "end_ms": 1792555200000,
+            "id": 501,
+            "is_all_day": false,
+            "location": null,
+            "recurring": false,
+            "response": "needsAction",
+            "start_ms": 1792123200000,
+            "title": "OOO unknown-type control"
+          }
+        ],
+        "placed": [
+          {
+            "column": 0,
+            "columns": 1,
+            "height": 0.1666666716337204,
+            "idx": 0,
+            "top": 0.0
+          }
+        ],
+        "start_ms": 1792540800000
+      },
+      {
+        "end_ms": 1792713600000,
+        "events": [],
+        "placed": [],
+        "start_ms": 1792627200000
+      },
+      {
+        "end_ms": 1792800000000,
+        "events": [],
+        "placed": [],
+        "start_ms": 1792713600000
+      },
+      {
+        "end_ms": 1792886400000,
+        "events": [],
+        "placed": [],
+        "start_ms": 1792800000000
+      },
+      {
+        "end_ms": 1792972800000,
+        "events": [],
+        "placed": [],
+        "start_ms": 1792886400000
+      }
+    ],
+    "overflow": []
+  },
+  "detail": {
+    "attendees": [],
+    "calendar_default_reminders": [],
+    "calendar_id": 1,
+    "can_edit": true,
+    "can_respond": false,
+    "color": null,
+    "conference_uri": null,
+    "description": null,
+    "end_date": "2026-10-20",
+    "end_ms": 1792555200000,
+    "guests_can_modify": false,
+    "id": 1,
+    "is_all_day": true,
+    "is_organizer": true,
+    "is_out_of_office": true,
+    "is_recurring": false,
+    "is_series_exception": false,
+    "location": null,
+    "mails_guests": true,
+    "native_is_all_day": false,
+    "occurrence_end_ms": 1792555200000,
+    "occurrence_start_ms": 1792123200000,
+    "organizer_email": null,
+    "recurrence": null,
+    "reminders": {
+      "overrides": [],
+      "use_default": false
+    },
+    "repeat": "never",
+    "repeat_end": {
+      "kind": "never"
+    },
+    "self_response": "needsAction",
+    "start_date": "2026-10-16",
+    "start_ms": 1792123200000,
+    "title": "OOO (🍂)",
+    "weekly_days": []
+  },
+  "dst_details": [
+    {
+      "attendees": [],
+      "calendar_default_reminders": [],
+      "calendar_id": 1,
+      "can_edit": true,
+      "can_respond": false,
+      "color": null,
+      "conference_uri": null,
+      "description": null,
+      "end_date": "2026-03-07",
+      "end_ms": 1772946000000,
+      "guests_can_modify": false,
+      "id": 2,
+      "is_all_day": true,
+      "is_organizer": true,
+      "is_out_of_office": true,
+      "is_recurring": true,
+      "is_series_exception": false,
+      "location": null,
+      "mails_guests": true,
+      "native_is_all_day": false,
+      "occurrence_end_ms": 1772946000000,
+      "occurrence_start_ms": 1772859600000,
+      "organizer_email": null,
+      "recurrence": "RRULE:FREQ=DAILY;COUNT=3",
+      "reminders": {
+        "overrides": [],
+        "use_default": false
+      },
+      "repeat": "daily",
+      "repeat_end": {
+        "count": 3,
+        "kind": "after"
+      },
+      "self_response": "needsAction",
+      "start_date": "2026-03-07",
+      "start_ms": 1772859600000,
+      "title": "OOO recurring",
+      "weekly_days": []
+    },
+    {
+      "attendees": [],
+      "calendar_default_reminders": [],
+      "calendar_id": 1,
+      "can_edit": true,
+      "can_respond": false,
+      "color": null,
+      "conference_uri": null,
+      "description": null,
+      "end_date": null,
+      "end_ms": 1772946000000,
+      "guests_can_modify": false,
+      "id": 2,
+      "is_all_day": false,
+      "is_organizer": true,
+      "is_out_of_office": true,
+      "is_recurring": true,
+      "is_series_exception": false,
+      "location": null,
+      "mails_guests": true,
+      "native_is_all_day": false,
+      "occurrence_end_ms": 1773032400000,
+      "occurrence_start_ms": 1772946000000,
+      "organizer_email": null,
+      "recurrence": "RRULE:FREQ=DAILY;COUNT=3",
+      "reminders": {
+        "overrides": [],
+        "use_default": false
+      },
+      "repeat": "daily",
+      "repeat_end": {
+        "count": 3,
+        "kind": "after"
+      },
+      "self_response": "needsAction",
+      "start_date": null,
+      "start_ms": 1772859600000,
+      "title": "OOO recurring",
+      "weekly_days": []
+    },
+    {
+      "attendees": [],
+      "calendar_default_reminders": [],
+      "calendar_id": 1,
+      "can_edit": true,
+      "can_respond": false,
+      "color": null,
+      "conference_uri": null,
+      "description": null,
+      "end_date": "2026-03-09",
+      "end_ms": 1772946000000,
+      "guests_can_modify": false,
+      "id": 2,
+      "is_all_day": true,
+      "is_organizer": true,
+      "is_out_of_office": true,
+      "is_recurring": true,
+      "is_series_exception": false,
+      "location": null,
+      "mails_guests": true,
+      "native_is_all_day": false,
+      "occurrence_end_ms": 1773115200000,
+      "occurrence_start_ms": 1773028800000,
+      "organizer_email": null,
+      "recurrence": "RRULE:FREQ=DAILY;COUNT=3",
+      "reminders": {
+        "overrides": [],
+        "use_default": false
+      },
+      "repeat": "daily",
+      "repeat_end": {
+        "count": 3,
+        "kind": "after"
+      },
+      "self_response": "needsAction",
+      "start_date": "2026-03-09",
+      "start_ms": 1772859600000,
+      "title": "OOO recurring",
+      "weekly_days": []
+    }
+  ],
+  "dst_master": {
+    "attendees": [],
+    "calendar_default_reminders": [],
+    "calendar_id": 1,
+    "can_edit": true,
+    "can_respond": false,
+    "color": null,
+    "conference_uri": null,
+    "description": null,
+    "end_date": "2026-03-07",
+    "end_ms": 1772946000000,
+    "guests_can_modify": false,
+    "id": 2,
+    "is_all_day": true,
+    "is_organizer": true,
+    "is_out_of_office": true,
+    "is_recurring": true,
+    "is_series_exception": false,
+    "location": null,
+    "mails_guests": true,
+    "native_is_all_day": false,
+    "occurrence_end_ms": null,
+    "occurrence_start_ms": null,
+    "organizer_email": null,
+    "recurrence": "RRULE:FREQ=DAILY;COUNT=3",
+    "reminders": {
+      "overrides": [],
+      "use_default": false
+    },
+    "repeat": "daily",
+    "repeat_end": {
+      "count": 3,
+      "kind": "after"
+    },
+    "self_response": "needsAction",
+    "start_date": "2026-03-07",
+    "start_ms": 1772859600000,
+    "title": "OOO recurring",
+    "weekly_days": []
+  },
+  "dst_week": {
+    "all_day": [
+      {
+        "cont_left": false,
+        "cont_right": false,
+        "end_col": 5,
+        "idx": 0,
+        "lane": 0,
+        "start_col": 5
+      }
+    ],
+    "all_day_events": [
+      {
+        "all_day_dates": [
+          "2026-03-07",
+          "2026-03-07"
+        ],
+        "all_guests_declined": false,
+        "attendees": 0,
+        "calendar_id": 1,
+        "color": "#5b8def",
+        "conference": null,
+        "end_ms": 1772946000000,
+        "id": 2,
+        "is_all_day": true,
+        "is_out_of_office": true,
+        "location": null,
+        "recurring": true,
+        "response": "needsAction",
+        "start_ms": 1772859600000,
+        "title": "OOO recurring"
+      }
+    ],
+    "days": [
+      {
+        "end_ms": 1772496000000,
+        "events": [],
+        "placed": [],
+        "start_ms": 1772409600000
+      },
+      {
+        "end_ms": 1772582400000,
+        "events": [],
+        "placed": [],
+        "start_ms": 1772496000000
+      },
+      {
+        "end_ms": 1772668800000,
+        "events": [],
+        "placed": [],
+        "start_ms": 1772582400000
+      },
+      {
+        "end_ms": 1772755200000,
+        "events": [],
+        "placed": [],
+        "start_ms": 1772668800000
+      },
+      {
+        "end_ms": 1772841600000,
+        "events": [],
+        "placed": [],
+        "start_ms": 1772755200000
+      },
+      {
+        "end_ms": 1772928000000,
+        "events": [],
+        "placed": [],
+        "start_ms": 1772841600000
+      },
+      {
+        "end_ms": 1773014400000,
+        "events": [
+          {
+            "all_guests_declined": false,
+            "attendees": 0,
+            "calendar_id": 1,
+            "color": "#5b8def",
+            "conference": null,
+            "end_ms": 1773032400000,
+            "id": 2,
+            "is_all_day": false,
+            "is_out_of_office": true,
+            "location": null,
+            "recurring": true,
+            "response": "needsAction",
+            "start_ms": 1772946000000,
+            "title": "OOO recurring"
+          }
+        ],
+        "placed": [
+          {
+            "column": 0,
+            "columns": 1,
+            "height": 0.7916666865348816,
+            "idx": 0,
+            "top": 0.2083333283662796
+          }
+        ],
+        "start_ms": 1772928000000
+      }
+    ],
+    "overflow": []
+  },
+  "partial_detail": {
+    "attendees": [],
+    "calendar_default_reminders": [],
+    "calendar_id": 1,
+    "can_edit": true,
+    "can_respond": false,
+    "color": null,
+    "conference_uri": null,
+    "description": null,
+    "end_date": null,
+    "end_ms": 1792558800000,
+    "guests_can_modify": false,
+    "id": 1,
+    "is_all_day": false,
+    "is_organizer": true,
+    "is_out_of_office": true,
+    "is_recurring": false,
+    "is_series_exception": false,
+    "location": null,
+    "mails_guests": true,
+    "native_is_all_day": false,
+    "occurrence_end_ms": 1792558800000,
+    "occurrence_start_ms": 1792126800000,
+    "organizer_email": null,
+    "recurrence": null,
+    "reminders": {
+      "overrides": [],
+      "use_default": false
+    },
+    "repeat": "never",
+    "repeat_end": {
+      "kind": "never"
+    },
+    "self_response": "needsAction",
+    "start_date": null,
+    "start_ms": 1792126800000,
+    "title": "OOO (🍂)",
+    "weekly_days": []
+  },
+  "partial_week": {
+    "all_day": [],
+    "all_day_events": [],
+    "days": [
+      {
+        "end_ms": 1792454400000,
+        "events": [
+          {
+            "all_guests_declined": false,
+            "attendees": 0,
+            "calendar_id": 1,
+            "color": "#5b8def",
+            "conference": null,
+            "end_ms": 1792558800000,
+            "id": 1,
+            "is_all_day": false,
+            "is_out_of_office": true,
+            "location": null,
+            "recurring": false,
+            "response": "needsAction",
+            "start_ms": 1792126800000,
+            "title": "OOO (🍂)"
+          }
+        ],
+        "placed": [
+          {
+            "column": 0,
+            "columns": 1,
+            "height": 1.0,
+            "idx": 0,
+            "top": 0.0
+          }
+        ],
+        "start_ms": 1792368000000
+      },
+      {
+        "end_ms": 1792540800000,
+        "events": [
+          {
+            "all_guests_declined": false,
+            "attendees": 0,
+            "calendar_id": 1,
+            "color": "#5b8def",
+            "conference": null,
+            "end_ms": 1792558800000,
+            "id": 1,
+            "is_all_day": false,
+            "is_out_of_office": true,
+            "location": null,
+            "recurring": false,
+            "response": "needsAction",
+            "start_ms": 1792126800000,
+            "title": "OOO (🍂)"
+          }
+        ],
+        "placed": [
+          {
+            "column": 0,
+            "columns": 1,
+            "height": 1.0,
+            "idx": 0,
+            "top": 0.0
+          }
+        ],
+        "start_ms": 1792454400000
+      },
+      {
+        "end_ms": 1792627200000,
+        "events": [
+          {
+            "all_guests_declined": false,
+            "attendees": 0,
+            "calendar_id": 1,
+            "color": "#5b8def",
+            "conference": null,
+            "end_ms": 1792558800000,
+            "id": 1,
+            "is_all_day": false,
+            "is_out_of_office": true,
+            "location": null,
+            "recurring": false,
+            "response": "needsAction",
+            "start_ms": 1792126800000,
+            "title": "OOO (🍂)"
+          }
+        ],
+        "placed": [
+          {
+            "column": 0,
+            "columns": 1,
+            "height": 0.2083333283662796,
+            "idx": 0,
+            "top": 0.0
+          }
+        ],
+        "start_ms": 1792540800000
+      },
+      {
+        "end_ms": 1792713600000,
+        "events": [],
+        "placed": [],
+        "start_ms": 1792627200000
+      },
+      {
+        "end_ms": 1792800000000,
+        "events": [],
+        "placed": [],
+        "start_ms": 1792713600000
+      },
+      {
+        "end_ms": 1792886400000,
+        "events": [],
+        "placed": [],
+        "start_ms": 1792800000000
+      },
+      {
+        "end_ms": 1792972800000,
+        "events": [],
+        "placed": [],
+        "start_ms": 1792886400000
+      }
+    ],
+    "overflow": []
+  },
+  "week": {
+    "all_day": [
+      {
+        "cont_left": true,
+        "cont_right": false,
+        "end_col": 1,
+        "idx": 0,
+        "lane": 0,
+        "start_col": 0
+      }
+    ],
+    "all_day_events": [
+      {
+        "all_day_dates": [
+          "2026-10-16",
+          "2026-10-20"
+        ],
+        "all_guests_declined": false,
+        "attendees": 0,
+        "calendar_id": 1,
+        "color": "#5b8def",
+        "conference": null,
+        "end_ms": 1792555200000,
+        "id": 1,
+        "is_all_day": true,
+        "is_out_of_office": true,
+        "location": null,
+        "recurring": false,
+        "response": "needsAction",
+        "start_ms": 1792123200000,
+        "title": "OOO (🍂)"
+      }
+    ],
+    "days": [
+      {
+        "end_ms": 1792454400000,
+        "events": [],
+        "placed": [],
+        "start_ms": 1792368000000
+      },
+      {
+        "end_ms": 1792540800000,
+        "events": [],
+        "placed": [],
+        "start_ms": 1792454400000
+      },
+      {
+        "end_ms": 1792627200000,
+        "events": [],
+        "placed": [],
+        "start_ms": 1792540800000
+      },
+      {
+        "end_ms": 1792713600000,
+        "events": [],
+        "placed": [],
+        "start_ms": 1792627200000
+      },
+      {
+        "end_ms": 1792800000000,
+        "events": [],
+        "placed": [],
+        "start_ms": 1792713600000
+      },
+      {
+        "end_ms": 1792886400000,
+        "events": [],
+        "placed": [],
+        "start_ms": 1792800000000
+      },
+      {
+        "end_ms": 1792972800000,
+        "events": [],
+        "placed": [],
+        "start_ms": 1792886400000
+      }
+    ],
+    "overflow": []
+  }
+}

@@ -24,6 +24,11 @@ test('a timed save lands at its new time, with its title and place', () => {
   });
 });
 
+test('OOO timing waits for Rust while descriptive edits remain optimistic', () => {
+  const c = map(result({ summary: 'OOO renamed', when: { kind: 'timed', startMs: T + H, endMs: T + 2 * H } }), req({ isOutOfOffice: true }));
+  expect(c).toMatchObject({ kind: 'edit', when: null, patch: { title: 'OOO renamed' } });
+});
+
 test('no title is drawn as the backend draws it', () => {
   expect(map(result({ summary: null })).kind === 'edit' && (map(result({ summary: null })) as any).patch.title).toBe('(no title)');
 });

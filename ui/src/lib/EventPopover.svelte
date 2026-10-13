@@ -134,9 +134,9 @@
    * function, so the two cannot drift apart on screen again — see its comment in
    * `eventform.ts` for why the subtraction has no zone in it.
    *
-   * Only the first day, for a multi-day all-day event, which is what this line
-   * has always shown. Widening it to a range is a display question, not a
-   * boundary one, and is not this task's.
+   * Native all-day events retain their first-day label. Whole-day OOO shows
+   * its Rust-projected inclusive range. Contextual dates are already the
+   * clicked interval's dates and must not receive a second JS shift.
    *
    * One consequence worth stating, since `detail` is a live prop and these two
    * are not: the after-paint `refresh_event` no longer moves this line. It
@@ -145,13 +145,18 @@
    * was not on — and a genuine time change reaches the screen the way every
    * other one does, when the grid reloads.
    */
+  const shownStartMs = $derived(detail.occurrence_start_ms ?? occurrenceStartMs);
+  const shownEndMs = $derived(detail.occurrence_end_ms ?? occurrenceEndMs);
   const day = $derived(
     detail.is_all_day
-      ? dayOfDate(occurrenceDate(detail.start_date, detail.start_ms, occurrenceStartMs))
-      : dayOfInstant(occurrenceStartMs),
+      ? dayOfDate(detail.occurrence_start_ms != null && detail.start_date != null
+          ? detail.start_date : occurrenceDate(detail.start_date, detail.start_ms, shownStartMs))
+      : dayOfInstant(shownStartMs),
   );
+  const lastDay = $derived(detail.is_all_day && detail.is_out_of_office && detail.end_date
+    ? dayOfDate(detail.end_date) : day);
   const whenLine = $derived(
-    detail.is_all_day ? day : `${day} · ${hhmm(occurrenceStartMs)}–${hhmm(occurrenceEndMs)}`,
+    detail.is_all_day ? (lastDay === day ? day : `${day}–${lastDay}`) : `${day} · ${hhmm(shownStartMs)}–${hhmm(shownEndMs)}`,
   );
 
   // A neutral default so `.pop` renders (and so `offsetWidth`/`offsetHeight`
