@@ -706,10 +706,15 @@
       <input
         type="checkbox"
         checked={value.isAllDay}
+        disabled={value.isOutOfOffice}
+        aria-describedby={value.isOutOfOffice ? 'ooo-timing-note' : undefined}
         onchange={(e) => (value = toggledAllDay(value, e.currentTarget.checked))}
       />
       All day
     </label>
+    {#if value.isOutOfOffice}
+      <p class="hint" id="ooo-timing-note">Out-of-office events keep start and end times.</p>
+    {/if}
 
     <div class="when">
       <label class="field">
@@ -1012,7 +1017,8 @@
           This event
         </label>
         <label>
-          <input type="radio" name="scope" checked={scope === 'following'} disabled={movingCalendar}
+          <input type="radio" name="scope" checked={scope === 'following'} disabled={movingCalendar || value.isOutOfOffice}
+                 aria-describedby={value.isOutOfOffice ? 'ooo-split-note' : undefined}
                  onchange={() => (scope = 'following')} />
           This and following
         </label>
@@ -1021,6 +1027,9 @@
           All events
         </label>
       </div>
+      {#if value.isOutOfOffice}
+        <p class="hint" id="ooo-split-note">Out-of-office events cannot be split here. Edit this event or all events.</p>
+      {/if}
       {#if movingCalendar}
         <p class="hint" data-testid="move-series-note">
           Another calendar was chosen, and a series moves whole: this applies

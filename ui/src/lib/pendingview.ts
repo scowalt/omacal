@@ -120,9 +120,10 @@ function nearestMidnight(ms: number): number {
  *  somewhere else. Applied in the order the changes were made. An edit whose
  *  time waits for the save (`when: null`) leaves it where it is but `held`:
  *  marked as saving, so it cannot be grabbed (part 2 spec §1.5). */
-function fate(ev: UiEvent, changes: readonly PendingChange[]): { hidden: boolean; moved: UiEvent | null; held: boolean } {
+function fate(ev: UiEvent, changes: readonly PendingChange[]): { hidden: boolean; moved: UiEvent | null; held: boolean; patch: EditPatch } {
   let hidden = false;
   let held = false;
+  let patch: EditPatch = {};
   let moved: UiEvent | null = null;
   for (const c of changes) {
     if (!covers(c, ev)) continue;
@@ -135,7 +136,7 @@ function fate(ev: UiEvent, changes: readonly PendingChange[]): { hidden: boolean
       continue;
     }
     const w = c.when;
-    if (!w) { held = true; continue; }
+    if (!w) { held = true; if (ev.is_out_of_office) patch = { ...patch, ...c.patch }; continue; }
     hidden = true;
     let start: number;
     let end: number;
@@ -156,7 +157,7 @@ function fate(ev: UiEvent, changes: readonly PendingChange[]): { hidden: boolean
     }
     moved = { ...ev, ...c.patch, start_ms: start, end_ms: end, is_all_day: w.allDay, pending: true };
   }
-  return { hidden, moved, held: held && !hidden };
+  return { hidden, moved, held: held && !hidden, patch };
 }
 
 /** One list after the changes: hidden events dropped, held ones flagged
@@ -171,7 +172,7 @@ function sift(
     const f = fate(e, changes);
     if (f.moved) take(e, f.moved);
     if (f.hidden) { changed = true; return false; }
-    if (f.held) { changed = true; out.push({ ...e, pending: true }); } else out.push(e);
+    if (f.held) { changed = true; out.push({ ...e, ...f.patch, pending: true }); } else out.push(e);
     return true;
   });
   return { out, keep, changed };
@@ -345,7 +346,7 @@ function rebuildGuests(stored: Attendee[], guests: { email: string; optional: bo
 export function overlayDetail(detail: EventDetail, changes: readonly PendingChange[], occurrenceStartMs: number): EventDetail {
   let out = detail;
   for (const c of changes) {
-    if (c.kind !== 'edit' || c.when === null || !locks(c, detail.id, occurrenceStartMs)) continue;
+    if (c.kind !== 'edit' || (c.when === null && !detail.is_out_of_office) || !locks(c, detail.id, occurrenceStartMs)) continue;
     out = {
       ...out,
       ...(c.patch.title !== undefined ? { title: c.patch.title } : {}),
@@ -354,14 +355,16 @@ export function overlayDetail(detail: EventDetail, changes: readonly PendingChan
       ...(c.patch.conference === null ? { conference_uri: null } : {}),
       ...(c.detail.description !== undefined ? { description: c.detail.description } : {}),
       ...(c.detail.guests ? { attendees: rebuildGuests(out.attendees, c.detail.guests) } : {}),
-      is_all_day: c.when.allDay,
-      // An all-day card reads its day off `start_date`, shifted by how far the
-      // clicked card sits from `start_ms` (`occurrenceDate`), and a timed
-      // detail carries neither: so both come from `when`, as one pair.
-      ...(c.when.allDay
-        ? { start_ms: c.when.startMs, end_ms: c.when.endMs,
-            start_date: dateOf(c.when.startMs), end_date: dateOf(addDays(c.when.endMs, -1)) }
-        : { start_date: null, end_date: null }),
+      // Deferred OOO timing keeps authoritative flags, dates and context;
+      // descriptions can still change while the request is pending.
+      ...(c.when ? {
+        is_all_day: c.when.allDay,
+        ...(out.occurrence_start_ms != null ? { occurrence_start_ms: c.when.startMs, occurrence_end_ms: c.when.endMs } : {}),
+        ...(c.when.allDay
+          ? { start_ms: c.when.startMs, end_ms: c.when.endMs,
+              start_date: dateOf(c.when.startMs), end_date: dateOf(addDays(c.when.endMs, -1)) }
+          : { start_date: null, end_date: null }),
+      } : {}),
     };
   }
   return out;

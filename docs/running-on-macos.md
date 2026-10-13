@@ -267,6 +267,26 @@ the loopback listener. Close it and retry.
 
 **Blank window** — check `npm --prefix ui run build` succeeds, then rerun.
 
+### Google OOO still appears timed
+
+Whole-day Google out-of-office events are presented all-day using their
+**authored timezone**, while their editor, reminder firing and `.ics` export
+stay timed. The All day switch and following-scope splitting edit are disabled;
+“This one” and “All” edits remain available. Partial-day OOO stays timed.
+
+Older cached rows lack Google's event type. A normal refetch can populate it;
+**Sync now alone is usually incremental, not a cache clear**. To rebuild only
+the affected calendar after installing this fix:
+
+1. Open **Settings → Calendars** and choose **Remove** for that calendar.
+2. Choose **Add**, then **Sync now**.
+
+This preserves the account, visibility, labels and colour overrides, but
+Remove deletes local events and that calendar's invitation/change history.
+The rebuild fetches the current window (180 days back / 365 days forward);
+older removed events will not return. Use this deliberately, not as routine
+troubleshooting. No automatic backfill or reset is performed by the fix.
+
 ## What is not built yet
 
 Offline writes: a save needs the network and says so rather than queueing.

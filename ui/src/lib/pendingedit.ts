@@ -14,6 +14,8 @@ export type EditRequest = {
   occurrenceStartMs: number;
   wasAllDay: boolean;
   isRecurring: boolean;
+  /** A provider fact, not a JS whole-day classifier. */
+  isOutOfOffice?: boolean;
   calendarId: number | null;
 };
 
@@ -33,7 +35,7 @@ export function editChange(
   const repeatChanged = f.repeat !== undefined || f.weeklyDays !== undefined || f.repeatEnd !== undefined;
   const allDay = f.when.kind === 'allDay';
   const seriesSwitch = req.isRecurring && result.scope !== 'this' && allDay !== req.wasAllDay;
-  const when = repeatChanged || seriesSwitch ? null : drawnWhen(f.when, dayMs);
+  const when = req.isOutOfOffice || repeatChanged || seriesSwitch ? null : drawnWhen(f.when, dayMs);
 
   const patch: EditPatch = { title: f.summary ?? '(no title)', location: f.location };
   if (result.calendarId !== req.calendarId) {

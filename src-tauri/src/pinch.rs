@@ -25,6 +25,7 @@
 //! with the macOS one. The grid decides what a pinch means; this file only
 //! delivers it.
 
+#[cfg(target_os = "linux")]
 #[derive(serde::Serialize, Clone)]
 struct Pinch {
     /// `begin`, `update` or `end` — GTK's own phases, less `cancel`, which

@@ -68,8 +68,9 @@ pub(crate) fn invite_notification_with_format(
     time_format: crate::settings::TimeFormat,
     date_format: crate::settings::DateFormat,
 ) -> Notification {
-    let when = if c.is_all_day {
-        format!("{} · All day", date_in_words(c.start_utc, &c.calendar_timezone, date_format))
+    let shown = c.presentation();
+    let when = if shown.is_all_day() {
+        format!("{} · All day", date_in_words(c.start_utc, shown.timezone().unwrap_or(&c.calendar_timezone), date_format))
     } else {
         format!(
             "{} · {}",
@@ -212,19 +213,14 @@ pub(crate) struct PendingInvite {
 }
 
 fn to_pending(c: &InviteCandidate, demo: bool) -> PendingInvite {
-    let (start_date, end_date) = if c.is_all_day {
-        let (s, e) =
-            crate::write::all_day_span_dates(c.start_utc, c.end_utc, &c.calendar_timezone);
-        (Some(s), Some(e))
-    } else {
-        (None, None)
-    };
+    let shown = c.presentation();
+    let (start_date, end_date) = shown.inclusive_dates().map(|(s, e)| (Some(s), Some(e))).unwrap_or((None, None));
     PendingInvite {
         id: c.event_id,
         title: c.summary.clone(),
         start_ms: c.start_utc,
         end_ms: c.end_utc,
-        is_all_day: c.is_all_day,
+        is_all_day: shown.is_all_day(),
         start_date,
         end_date,
         organizer_email: c.organizer_email.clone(),
@@ -286,13 +282,8 @@ pub(crate) async fn declined_guests_impl(
         .await?
         .into_iter()
         .map(|d| {
-            let (start_date, end_date) = if d.is_all_day {
-                let (s, e) =
-                    crate::write::all_day_span_dates(d.start_utc, d.end_utc, &d.calendar_timezone);
-                (Some(s), Some(e))
-            } else {
-                (None, None)
-            };
+            let shown = d.presentation();
+            let (start_date, end_date) = shown.inclusive_dates().map(|(s, e)| (Some(s), Some(e))).unwrap_or((None, None));
             DeclineNotice {
                 calendar_id: d.calendar_id,
                 gid: d.gid,
@@ -301,7 +292,7 @@ pub(crate) async fn declined_guests_impl(
                 title: d.summary,
                 start_ms: d.start_utc,
                 end_ms: d.end_utc,
-                is_all_day: d.is_all_day,
+                is_all_day: shown.is_all_day(),
                 start_date,
                 end_date,
                 color: d.color_hex,
@@ -558,6 +549,7 @@ mod tests {
             id: 0,
             calendar_id: 1,
             google_id: gid.into(),
+            google_event_type: None,
             summary: Some("NVP sync meeting".into()),
             location: None,
             start_utc: start,
@@ -600,6 +592,8 @@ mod tests {
             start_utc: NOW + HOUR, // 10:00Z = 13:00 Sofia
             end_utc: NOW + 2 * HOUR,
             is_all_day: false,
+            google_event_type: None,
+            event_timezone: "UTC".into(),
             organizer_email: Some("ana@x.com".into()),
             calendar_timezone: SOFIA.into(),
             calendar_selected: true,
@@ -752,6 +746,23 @@ mod tests {
         assert!(!to_pending(&caldav, false).can_respond);
     }
 
+    #[test]
+    fn ooo_live_invite_labels_use_authored_days_but_keep_native_instants() {
+        let mut c = candidate();
+        c.google_event_type = Some("outOfOffice".into());
+        c.event_timezone = "America/New_York".into();
+        c.calendar_timezone = "Pacific/Auckland".into();
+        c.start_utc = 1792123200000;
+        c.end_utc = 1792555200000;
+        let shown = to_pending(&c, false);
+        assert!(shown.is_all_day);
+        assert_eq!(shown.start_date.as_deref(), Some("2026-10-16"));
+        assert_eq!(shown.end_date.as_deref(), Some("2026-10-20"));
+        assert_eq!((shown.start_ms, shown.end_ms), (1792123200000, 1792555200000));
+        assert!(invite_notification(&c, "UTC").body.starts_with("Fri, Oct 16 · All day"));
+        assert!(!c.is_all_day);
+    }
+
     /// An all-day invite carries its calendar-zone days, worked out here —
     /// the browser must never re-derive them from the instant
     /// (`EventDetail::start_date`'s trap).
@@ -821,7 +832,10 @@ mod tests {
         assert!(invite_notification(&caldav, SOFIA).sticky, "no click, still worth seeing");
     }
 
-    /// The click is offered — and instructed — only where it can act.
+    /// Only the Linux transport exposes the accepting click (macOS has no
+    /// button-less accepting action). This fixture used to assume Linux on
+    /// every host and failed the unmodified workspace on macOS.
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_accepting_click_exists_only_for_an_answerable_google_event() {
         let n = invite_notification(&candidate(), SOFIA);

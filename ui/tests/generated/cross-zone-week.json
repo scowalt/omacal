@@ -56,6 +56,10 @@
   "all_day_events": [
     {
       "calendar_id": 1,
+      "all_day_dates": [
+        "2026-08-12",
+        "2026-08-12"
+      ],
       "id": 4245,
       "title": "Berlin trip",
       "location": null,

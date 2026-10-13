@@ -109,6 +109,9 @@ pub struct Organizer {
 #[serde(rename_all = "camelCase")]
 pub struct Event {
     pub id: String,
+    /// Provider identity, independent of date-only/native timing. Unknown
+    /// strings survive; absent on legacy payloads and cancellation stubs.
+    pub event_type: Option<String>,
     /// `confirmed` | `tentative` | `cancelled`. Cancelled rows are tombstones
     /// delivered by incremental sync and carry almost no other fields.
     #[serde(default)]
@@ -175,6 +178,19 @@ mod tests {
 
     fn parse_event(v: serde_json::Value) -> Event {
         serde_json::from_value(v).expect("event should parse")
+    }
+
+    #[test]
+    fn out_of_office_keeps_its_type_and_timed_midnight_endpoints() {
+        let ev = parse_event(serde_json::json!({
+            "id": "ooo-display-regression", "eventType": "outOfOffice",
+            "summary": "OOO (🍂)", "status": "confirmed",
+            "start": {"dateTime": "2026-10-16T00:00:00-04:00", "timeZone": "America/New_York"},
+            "end": {"dateTime": "2026-10-21T00:00:00-04:00", "timeZone": "America/New_York"}
+        }));
+        assert_eq!(ev.event_type.as_deref(), Some("outOfOffice"));
+        assert!(ev.start.date.is_none());
+        assert_eq!(ev.end.date_time.as_deref(), Some("2026-10-21T00:00:00-04:00"));
     }
 
     #[test]

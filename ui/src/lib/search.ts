@@ -12,6 +12,9 @@ export type Hit = {
   title: string;
   startMs: number;
   endMs: number;
+  allDay?: boolean;
+  startDate?: string | null;
+  endDate?: string | null;
 };
 
 /**

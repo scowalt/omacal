@@ -78,6 +78,8 @@
             type="radio"
             name="move-scope"
             aria-label="This and following"
+            disabled={detail.is_out_of_office}
+            aria-describedby={detail.is_out_of_office ? 'ooo-move-split-note' : undefined}
             data-choice
             checked={scope === 'following'}
             onchange={() => (scope = 'following')}
@@ -102,6 +104,9 @@
           >
         </label>
       </div>
+      {#if detail.is_out_of_office}
+        <p class="notice" id="ooo-move-split-note">Out-of-office events cannot be split. Move this event or all events instead.</p>
+      {/if}
     {/if}
 
     {#if ownCopy}

@@ -259,6 +259,15 @@ step was skipped. The message names the exact path it looked for.
 
 **Blank window** — check `npm --prefix ui run build` succeeds, then rerun.
 
+**Google OOO still appears timed** — whole-day OOO uses authored civil dates
+for display, but remains timed for editing, reminders and export. Legacy rows
+need a provider refetch. The supported **Settings → Calendars → Remove → Add →
+Sync now** rebuild deletes that calendar's local events and invitation/change
+history; only the 180-day-back / 365-day-forward window is restored. Account,
+visibility, labels and colour overrides survive. See the
+[full workflow and caveats](running-on-macos.md#google-ooo-still-appears-timed);
+Sync now alone is normally incremental. There is no automatic reset.
+
 **Dropdown menus and checkboxes are light on a dark theme** (AppImage,
 before v0.20.0) — the AppImage's launch hook exported `GTK_THEME=Adwaita:light`,
 which makes GTK ignore the dark hint omacal sets. omacal now drops that

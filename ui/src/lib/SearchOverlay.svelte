@@ -125,7 +125,9 @@
             <li>
               <button class="hit" onclick={() => onpick({ kind: 'event', hit: h })}>
                 <b>{h.title}</b>
-                <em>{when(h.startMs)}</em>
+                <em>{h.startDate
+                  ? formatDate(Date.parse(`${h.startDate}T12:00:00Z`), dateFormat(), { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' })
+                  : when(h.startMs)}</em>
               </button>
             </li>
           {/each}

@@ -712,6 +712,7 @@ mod tests {
             id: 1,
             calendar_id: 1,
             google_id: "u".into(),
+            google_event_type: None,
             summary: None,
             location: None,
             start_utc: 1_786_352_400_000, // 2026-08-10T09:00Z
