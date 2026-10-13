@@ -2,8 +2,9 @@
 
 Approved in the design interview on 2026-10-12. This is the behavior contract;
 [the implementation plan](../plans/2026-10-12-omacal-ooo-all-day-presentation.md)
-describes the work and current verification evidence. Implementation is in
-progress; acceptance remains blocked by the full browser gate.
+describes the work and verification evidence. Implementation is verified by
+live user confirmation and the full Linux CI gates; the earlier local browser
+blocker and its diagnosis remain recorded in the plan.
 
 ## 1. Defect and verified example
 

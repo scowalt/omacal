@@ -1,8 +1,8 @@
 # Google OOO All-Day Presentation — Implementation Plan
 
-**Status:** source implementation verified in focused tests; stopped at full
-browser acceptance blockers. Not accepted or release-deployed. An explicitly
-user-authorized native preview is running; see the manual-preview record below.
+**Status:** implementation and full project gates verified in Linux CI, with
+live user confirmation. No release deployment. The explicitly user-authorized
+native preview remains running. Fork integration: [PR #1](https://github.com/scowalt/omacal/pull/1).
 
 **Goal:** Show whole-day Google out-of-office intervals as all-day consistently,
 without changing their native timed representation or unrelated behavior.
@@ -307,7 +307,7 @@ mutation restoration and evidence; do not invent fixed test-count thresholds.
 
 ## Definition of done
 
-- [ ] Spec section 7's acceptance cases have independent, red-capable witnesses.
+- [x] Spec section 7's acceptance cases have independent, red-capable witnesses.
 - [x] Cached metadata and fresh/retry metadata both enforce mutation safety.
 - [x] Source instants/native flags remain intact; all applicable read surfaces
   share the same per-interval classification and event-zone dates.
@@ -319,17 +319,18 @@ mutation restoration and evidence; do not invent fixed test-count thresholds.
   live calendars or deployed dotfiles/app profiles. The subsequent manual
   preview has separate user authorization recorded below.
 
-## Implementation checkpoint (blocked acceptance)
+## Implementation checkpoint (verified)
 
 Provider identity storage, shared per-interval Rust presentation, layout/CLI/
 search/feed labels, native reminder wording, occurrence-aware details and
 refresh/update responses, timed editor restrictions, deferred OOO overlays,
 Rust-backed browser fixtures, and CLI/cache-rebuild documentation are
 implemented. The original native timestamps and date-only flag remain intact.
-No release deployment has been made. Fork integration is now requested; remote
-CI verification is pending. The user-authorized manual preview uses a backed-up
-real cache, as recorded below. Do not treat this tree as accepted while its
-full browser gate remains unverified.
+No release deployment has been made. The user-authorized manual preview uses
+a backed-up real cache, as recorded below. The original local browser blocker
+was resolved for acceptance through the unchanged full Linux CI workflow;
+all three jobs passed. The failing macOS transport/baseline diagnostics are
+retained below as historical evidence, not reported as green.
 
 Verification logs and saved mutation sources are in
 `/tmp/omacal-ooo-impl.3O4fdN`. Full workspace checks have passed repeatedly,
@@ -351,7 +352,7 @@ warnings (`ui-check-handoff.log`, exit 0), and the one-time Impeccable detector
 returned `[]` and exit 0. Rust tests and clippy pass (`rust-handoff-final.log`
 and `clippy-handoff-final.log`, exit 0).
 
-The final broad browser gate exits 1: **2864 passed, 126 failed**
+The local broad browser gate exited 1: **2864 passed, 126 failed**
 (`ui-full-final.log`, inherited six workers). Not all 126 failures have been
 individually classified. Eight observed failures reproduce on
 archived base `f078d9d`: ribbon overflow in both engines, Chromium touch swipe,
@@ -377,12 +378,11 @@ and provider write serialization remain separate from display classification.
 The former trust-store pause is resolved: the user chose **Keep CA and
 continue**. Retain that CA and the shared proxy. Temporary servers are owned
 Portless routes with private sharing; stop only those owned servers after
-verification. Remaining acceptance work is a reliable full browser run,
-classification of its remaining failures, and any further witnesses that triage
-requires. The baseline failures and HTTPS transport issue must be resolved or
-verified in an appropriate environment before claiming the full gate passes.
-No additional exclusions, trust changes, deployment, or cache rebuild are
-implied by this handoff.
+verification. The required reliable full-browser verification subsequently
+passed in Linux CI (see the fork-integration record). The macOS baseline and
+HTTPS transport diagnostics remain separate tooling/platform debt; their
+failures have not been silently excluded or claimed fixed. No additional
+exclusions, trust changes, release deployment, or cache rebuild are implied.
 
 ### Recorded commands and mutation witnesses
 
@@ -440,9 +440,8 @@ final newlines, all 16 local documentation links/anchors resolve, fences are
 balanced, and the golden still carries the exact native epochs and inclusive
 October 16–20 dates. Temporary current/baseline harness servers are stopped
 at handoff; the shared proxy and authorized development CA remain untouched.
-The outstanding input is an appropriate reliable full-browser verification
-environment, or explicit authorization to expand scope to the baseline UI/
-shared-tooling failures. No acceptance exception has been granted.
+The previously outstanding reliable full-browser environment was supplied by
+GitHub's Linux CI. No acceptance exception was granted or needed.
 
 ## User-authorized native preview (2026-10-12)
 
@@ -479,5 +478,26 @@ reports `allDay: true`, `nativeAllDay: false`, `googleEventType: outOfOffice`,
 inclusive dates `2026-10-16` through `2026-10-20`, and unchanged native epochs
 `1792123200000` → `1792555200000`. The live regression is therefore verified
 for this cached event after the ordinary provider refetch. This manual result
-does not waive the outstanding full browser gate; remote CI verification is
-required before merging.
+did not waive the full browser gate; remote CI subsequently verified it.
+
+## Fork integration verification (2026-10-13 UTC)
+
+[CI run 38325241996](https://github.com/scowalt/omacal/actions/runs/38325241996)
+verified source commit `447815b7d46552bfcf062310d06277a1c18d8f20` on the fork.
+The existing workflow and its documented exclusions were unchanged:
+
+- `rust`: success — clippy with warnings denied and the complete workspace
+  suite with `--no-fail-fast`, 1163 passed, zero failures. Existing ignored
+  tests remain reported by the suite.
+- `ui (chromium)`: success — type checks and **1495 passed** in the full
+  behavioral suite.
+- `ui (webkit)`: success — type checks and **1495 passed** in the full
+  behavioral suite.
+- Overall workflow conclusion: **success**; `gh run watch --exit-status`
+  returned **0**. No third-party status-rollup claim is made.
+
+The fork initially had no registered workflows despite Actions being enabled.
+Reapplying that already-enabled flag registered the existing CI; it was then
+dispatched on the exact feature-branch head. No workflow, exclusion, branch
+protection, or test assertion was changed to obtain green. This documentation
+follow-up changes no source behavior; the PR carries current-head CI results.
