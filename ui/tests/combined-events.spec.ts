@@ -12,6 +12,25 @@ async function hoverCombined(page: Page) {
   await page.mouse.move(box.x + box.width / 4, box.y + box.height / 2);
 }
 
+async function grabCopy(page: Page, name = 'Home', edge: 'start' | 'end' | null = null) {
+  await hoverCombined(page);
+  const block = page.locator('.ev').filter({ hasText: 'Client call' });
+  const copy = page.getByRole('button', { name: `Open ${name} copy`, exact: true });
+  const before = (await block.boundingBox())!;
+  const panel = (await copy.boundingBox())!;
+  const col = await block.evaluate(el => {
+    const r = el.closest('.col')!.getBoundingClientRect();
+    return { width: r.width, height: r.height };
+  });
+  const x = panel.x + panel.width / 2;
+  const y = edge === 'start' ? panel.y + 2 : edge === 'end' ? panel.y + panel.height - 2 : panel.y + panel.height / 2;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  return { block, before, col, x, y };
+}
+
+const updates = (page: Page) => page.evaluate(() => window.__harness.calls.filter(c => c.cmd === 'update_event'));
+
 async function setup(page: Page, homeReadOnly = false, open = true) {
   const work = POPOVER_DETAILS[APP_GUESTS_ID];
   const home = { ...work, id: HOME_ID, calendar_id: 20, description: 'Personal notes',
@@ -225,19 +244,146 @@ test('combining is opt-in, saves immediately, reloads the calendar and survives 
   await expect.poll(() => page.evaluate(() => window.__harness.settingValues('combineIdenticalEvents'))).toEqual([true, false]);
 });
 
-test('a combined block requires a copy choice for edits but still allows Alt-drag creation', async ({ page }) => {
-  await setup(page);
+test('dragging a combined calendar copy previews moving that event', async ({ page }) => {
+  await setup(page, false, false);
+  const { block, before, x, y } = await grabCopy(page);
+  await page.mouse.move(x, y + 40, { steps: 5 });
+  await expect(block).toHaveClass(/dragging/);
+  expect((await block.boundingBox())!.y).toBeGreaterThan(before.y);
+  await expect(block).toHaveCSS('box-shadow', /rgb\(32, 176, 128\)/);
+  await expect(block).toHaveCSS('cursor', 'grabbing');
+  await expect(page.locator('.copy-panels')).toHaveCount(0);
   await page.keyboard.press('Escape');
-  const block = page.locator('.ev').filter({ hasText: 'Client call' });
-  const box = (await block.boundingBox())!;
-  const x = box.x + box.width / 2, y = box.y + box.height / 2;
-  await page.mouse.move(x, y);
-  await page.mouse.down();
+  await expect(block).not.toHaveClass(/dragging/);
+  expect((await block.boundingBox())!.y).toBeCloseTo(before.y, 0);
+  await page.mouse.up();
+  expect(await updates(page)).toEqual([]);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  // Cancelling must not swallow the next genuine copy click.
+  await hoverCombined(page);
+  await page.getByRole('button', { name: 'Open Home copy', exact: true }).click();
+  await expect(page.getByLabel('Calendar copy', { exact: true })).toHaveValue(String(HOME_ID));
+});
+
+for (const copy of [
+  { name: 'Personal', id: APP_GUESTS_ID, color: /rgb\(85, 119, 238\)/, guests: true },
+  { name: 'Home', id: HOME_ID, color: /rgb\(32, 176, 128\)/, guests: false },
+]) {
+  test(`dragging the ${copy.name} panel moves only that combined calendar copy`, async ({ page }) => {
+    await setup(page, false, false);
+    await hoverCombined(page);
+    await expect(page.getByRole('button', { name: `Open ${copy.name} copy`, exact: true })).toHaveCSS('cursor', 'grab');
+    const { block, before, col, x, y } = await grabCopy(page, copy.name);
+    const dy = col.height / 24; // one hour, independent of grid zoom
+    await page.mouse.move(x + col.width, y + dy, { steps: 8 });
+    await expect(block).toHaveClass(/dragging/);
+    await expect(block).toHaveCSS('box-shadow', copy.color);
+    const during = (await block.boundingBox())!;
+    expect(during.x - before.x).toBeCloseTo(col.width, 0);
+    expect(during.y - before.y).toBeCloseTo(dy, 0);
+    expect(during.height).toBeCloseTo(before.height, 0);
+    expect(await block.evaluate(el => {
+      const r = el.getBoundingClientRect();
+      const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+      return hit === el || el.contains(hit);
+    })).toBe(true);
+    await page.mouse.up();
+    const confirm = page.getByRole('dialog', { name: 'Move event', exact: true });
+    if (copy.guests) {
+      await expect(confirm).toBeVisible();
+      expect(await updates(page)).toEqual([]);
+      await confirm.getByRole('button', { name: 'Move without notifying', exact: true }).click();
+    }
+    await expect.poll(() => updates(page)).toHaveLength(1);
+    const original = POPOVER_DETAILS[APP_GUESTS_ID];
+    expect((await updates(page))[0].args).toMatchObject({
+      id: copy.id, occurrenceStartMs: original.start_ms, occurrenceEndMs: original.end_ms,
+      sendUpdates: 'none', fields: { when: {
+        startMs: original.start_ms + 25 * 3_600_000,
+        endMs: original.end_ms + 25 * 3_600_000,
+      } },
+    });
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+  });
+}
+
+for (const edge of ['start', 'end'] as const) {
+  test(`resizing a combined copy's ${edge} edge writes only that edge and copy`, async ({ page }) => {
+    await setup(page, false, false);
+    const { block, before, col, x, y } = await grabCopy(page, 'Home', edge);
+    expect(before.height, 'fixture must have resize bands').toBeGreaterThan(18);
+    const dy = col.height / 48 * (edge === 'start' ? -1 : 1);
+    await page.mouse.move(x, y + dy, { steps: 6 });
+    await expect(block).toHaveClass(/dragging/);
+    expect((await block.boundingBox())!.height - before.height).toBeCloseTo(Math.abs(dy), 0);
+    await page.mouse.up();
+    await expect.poll(() => updates(page)).toHaveLength(1);
+    const original = POPOVER_DETAILS[APP_GUESTS_ID];
+    expect((await updates(page))[0].args).toMatchObject({ id: HOME_ID, fields: { when: {
+      startMs: original.start_ms - (edge === 'start' ? 30 * 60_000 : 0),
+      endMs: original.end_ms + (edge === 'end' ? 30 * 60_000 : 0),
+    } } });
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+  });
+}
+
+test('a combined copy dropped back on its own slot writes nothing and opens no details', async ({ page }) => {
+  await setup(page, false, false);
+  const { block, x, y } = await grabCopy(page);
+  await page.mouse.move(x, y + 10, { steps: 4 });
+  await expect(block).toHaveClass(/dragging/);
+  await page.mouse.move(x, y, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(300); // allow an incorrectly dispatched async write to appear
+  expect(await updates(page)).toEqual([]);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+});
+
+test('a combined copy press below the drag threshold still opens its details', async ({ page }) => {
+  await setup(page, false, false);
+  const { block, x, y } = await grabCopy(page);
+  await page.mouse.move(x, y + 3, { steps: 3 });
+  await expect(block).not.toHaveClass(/dragging/);
+  await page.mouse.up();
+  await expect(page.getByLabel('Calendar copy', { exact: true })).toHaveValue(String(HOME_ID));
+  expect(await updates(page)).toEqual([]);
+});
+
+test('a read-only combined copy cannot be dragged or written', async ({ page }) => {
+  await setup(page, true, false);
+  await hoverCombined(page);
+  await expect(page.getByRole('button', { name: 'Open Home copy', exact: true })).toHaveCSS('cursor', 'pointer');
+  const { block, x, y } = await grabCopy(page);
   await page.mouse.move(x, y + 40, { steps: 5 });
   await expect(block).not.toHaveClass(/dragging/);
   await page.mouse.up();
-  expect(await page.evaluate(() => window.__harness.calls.filter(c => c.cmd === 'update_event'))).toEqual([]);
-  await page.keyboard.press('Escape');
+  await page.waitForTimeout(300);
+  expect(await updates(page)).toEqual([]);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+});
+
+test('a combined copy still saving cannot be dragged a second time', async ({ page }) => {
+  await setup(page, false, false);
+  await page.evaluate(() => window.__harness.holdNextWrite('update_event'));
+  const first = await grabCopy(page);
+  await page.mouse.move(first.x, first.y + 40, { steps: 5 });
+  await page.mouse.up();
+  await expect.poll(() => updates(page)).toHaveLength(1);
+  await hoverCombined(page);
+  await expect(page.getByRole('button', { name: 'Open Home copy', exact: true })).toHaveCSS('cursor', 'pointer');
+  const second = await grabCopy(page);
+  await page.mouse.move(second.x, second.y + 40, { steps: 5 });
+  await expect(second.block).not.toHaveClass(/dragging/);
+  await page.mouse.up();
+  expect(await updates(page)).toHaveLength(1);
+});
+
+test('a combined block still allows Alt-drag creation', async ({ page }) => {
+  await setup(page, false, false);
+  const block = page.locator('.ev').filter({ hasText: 'Client call' });
+  await block.scrollIntoViewIfNeeded();
+  const box = (await block.boundingBox())!;
+  const x = box.x + box.width / 2, y = box.y + box.height / 2;
   await page.keyboard.down('Alt');
   await page.mouse.move(x, y);
   await page.mouse.down();

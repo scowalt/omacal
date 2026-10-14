@@ -5,7 +5,8 @@
   import { RESIZE_EDGE_PX, beganDrag, hasResizeEdges } from './drag';
   import { formatClock } from './timefmt';
   import type { EventCopy, UiEvent, Placed } from './api';
-  import type { Calendar } from './calendars';
+  import { writableCalendars, type Calendar } from './calendars';
+  import { isPending } from './pending.svelte';
   import type { Rect } from './position';
   import { locationLabel } from './location';
   import { isUnsaved } from './pendingview';
@@ -38,8 +39,9 @@
     /** The pointer went down on this block. The grid decides whether that
      *  becomes a drag, and whether it is a move or a resize — see `drag.ts`'s
      *  threshold and `edgeAt`. This reports the press rather than interpreting
-     *  it. */
-    ongrab?: (event: UiEvent, e: PointerEvent) => void;
+     *  it. A copy panel also names the underlying calendar occurrence, so
+     *  the grid can move that copy without moving the others. */
+    ongrab?: (event: UiEvent, e: PointerEvent, copy?: EventCopy) => void;
     /**
      * Where this block is being dragged to, or `null` when it is not the one
      * under the pointer.
@@ -51,7 +53,7 @@
      * is in; pixels for `dx`, because a horizontal move is whole columns and a
      * block is only a fraction of one's width.
      */
-    preview?: { topDeltaPct: number; heightDeltaPct: number; dx: number } | null;
+    preview?: { topDeltaPct: number; heightDeltaPct: number; dx: number; color?: string } | null;
     /** The span the in-flight drag would write, so the card reads where the
      *  block *is*, not where it was picked up (2026-08-21, by request).
      *  `null` outside a drag. Presentational, like `preview` — but sourced
@@ -106,6 +108,7 @@
   const left = $derived(preview ? 0 : placed.column * (100 / placed.columns));
 
   const calendarName = $derived(calendars.find(c => c.id === event.calendar_id)?.summary);
+  const editableCalendars = $derived(writableCalendars(calendars));
 
   function restingRect(): Rect {
     const r = button!.getBoundingClientRect();
@@ -225,7 +228,7 @@
       : `calc(${placed.height * 100}% - 2px)`};
     {preview && preview.dx !== 0 ? `transform: translateX(${preview.dx}px);` : ''}
     left:calc({left}% + 3px); width:calc({width}% - 6px);
-    --cal:{event.color}; z-index:{placed.column + 1};
+    --cal:{preview?.color ?? event.color}; z-index:{placed.column + 1};
   "
   aria-label="{event.title}, {hhmm(shownStartMs)} to {hhmm(shownEndMs)}{meta ? `, ${meta}` : ''}{event.all_guests_declined ? ', everyone declined' : ''}{event.copies?.length ? `, ${event.copies.length} calendar copies` : calendarName ? `, ${calendarName}` : ''}"
   onclick={open}
@@ -284,7 +287,7 @@
       {#if tipCalendar}<span class="calendar-line"><i class="calendar-dot"></i><span class="calendar-label">{tipCalendar.summary}</span></span>{/if}
     </span>
   {/if}
-  <CalendarColors colors={showCopies ? [] : event.copies?.map(copy => copy.color)} segments={overlapColors} />
+  <CalendarColors colors={showCopies || preview ? [] : event.copies?.map(copy => copy.color)} segments={overlapColors} />
 </button>
 {#if showCopies}
   <!-- The selected calendar colors the whole card. Keep the copy targets
@@ -311,11 +314,14 @@
       {@const calendar = calendars.find(c => c.id === copy.calendar_id)}
       {@const label = `Open ${calendar?.summary ?? `Calendar ${copy.calendar_id}`} copy`}
       <button class="copy-panel" style:--cal={copy.color}
+        class:draggable={!!ongrab && !event.pending && !isPending(copy.id, copy.start_ms)
+          && editableCalendars.some(c => c.id === copy.calendar_id)}
         aria-label={label}
         onmouseenter={(e) => showCopyTip(copy, e)} onmouseleave={hideTip}
         onfocus={(e) => showCopyTip(copy, e)}
         onpointerdown={(e) => {
           rightPress = e.button === 2 ? { x: e.clientX, y: e.clientY } : null;
+          if (e.button === 0) { hideTip(); ongrab?.(event, e, copy); }
         }}
         onpointerup={(e) => {
           if (e.button !== 2 || !rightPress) return;
@@ -360,13 +366,14 @@
   .copy-panel { appearance: none; -webkit-appearance: none; flex: 1; min-width: 0;
     padding: 0; margin: 0; border: 0; border-radius: 0; cursor: pointer;
     background: transparent; }
+  .copy-panel.draggable { cursor: grab; }
   .copy-panel:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   .ev[data-combined-count].hovered { cursor: pointer; }
   /* Lifted while dragging so it reads as picked up, and above every other
      block so it is never hidden behind one it is passing over. No transition:
      the block is following a pointer and easing would put it behind the
      finger. */
-  .ev.dragging { z-index: 50 !important; opacity: 0.85; cursor: grabbing; }
+  .ev.dragging { z-index: 50 !important; opacity: 0.85; cursor: grabbing !important; }
   /* Saving (pending-changes spec): where the change put it, faded and dashed
      until Google confirms. Not grabbable — `WeekGrid` ignores the press — so
      it wears the pointer, not `grab`. */
