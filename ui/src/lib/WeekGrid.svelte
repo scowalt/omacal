@@ -1,7 +1,7 @@
 <!-- ui/src/lib/WeekGrid.svelte -->
 <script lang="ts">
   import { pendingResponse } from './responses.svelte';
-  import { pendingChanges, closeWhenEditClears } from './pending.svelte';
+  import { pendingChanges, closeWhenEditClears, isPending } from './pending.svelte';
   import { isUnsaved, overlayDetail } from './pendingview';
   import { visibleHours } from "./visiblehours.svelte";
   import { hideWeekends } from './hideweekends.svelte';
@@ -26,7 +26,7 @@
     settleTarget, skipWeekendStart, sliceWeek, springAt, springPlan, velocityOf, visibleIndex, type PanSample,
   } from './weekwindow';
   import type { DayColumn, Lane, Placed, WeekPayload, UiEvent } from './api';
-  import { calendarInk, type Calendar } from './calendars';
+  import { calendarInk, writableCalendars, type Calendar } from './calendars';
   import { containsPlacement } from './combined';
   import type { Rect } from './position';
   import EventBlock from './EventBlock.svelte';
@@ -772,6 +772,8 @@
      *  without the grid having to find it again in a `week` that may have been
      *  replaced by a background reload while the pointer was down. */
     event: UiEvent;
+    /** The displayed block can represent a different calendar copy from the
+     *  one being written. Keep its identity for the preview only. */
     id: number;
     startMs: number;
     originX: number;
@@ -792,7 +794,7 @@
     /** Where the block is drawn while dragging, relative to where `Placed`
      *  put it. Presentational only — the write reads `landed`, so the two can
      *  never disagree by being derived from one another. */
-    preview: { topDeltaPct: number; heightDeltaPct: number; dx: number } | null;
+    preview: { topDeltaPct: number; heightDeltaPct: number; dx: number; color: string } | null;
   };
   let drag = $state<Drag | null>(null);
 
@@ -1089,7 +1091,7 @@
     if (e.key === 'Escape') endPinDrag(false);
   };
 
-  function startDrag(event: UiEvent, day: { start_ms: number; end_ms: number }, e: PointerEvent) {
+  function startDrag(event: UiEvent, day: { start_ms: number; end_ms: number }, e: PointerEvent, displayed = event) {
     // Primary button only: a right-click opens a context menu and must not
     // leave a half-armed drag behind it.
     if (e.button !== 0) return;
@@ -1105,8 +1107,8 @@
       return;
     }
     if (event.copies && event.copies.length > 1) {
-      // A combined block has no single event to move. Choose a copy in its
-      // details first.
+      // Only a copy panel chooses a single underlying occurrence. A press
+      // on the combined block itself must not pick one arbitrarily.
       draggedNotClicked = false;
       return;
     }
@@ -1114,8 +1116,8 @@
 
     drag = {
       event,
-      id: event.id,
-      startMs: event.start_ms,
+      id: displayed.id,
+      startMs: displayed.start_ms,
       originX: e.clientX,
       originY: e.clientY,
       colHeight: colBox.height,
@@ -1183,6 +1185,7 @@
       // Whole columns in pixels: a block is a fraction of a column's width, so
       // translating it by its own width would land it somewhere arbitrary.
       dx: cols * d.colWidth,
+      color: d.event.color,
     };
   }
 
@@ -1547,7 +1550,10 @@
 
   const hoverContext = $derived.by(() => {
     const hover = hoveredPlacement;
-    if (!hover || createMode || drag) return null;
+    // A press below the threshold is still a click. Keep the copy targets
+    // in their packed lanes until it really drags, or a press resizes the
+    // panels underneath the pointer and its release hits a different copy.
+    if (!hover || createMode || drag?.moving) return null;
     const day = renderedDays.find(d => d.start_ms === hover.day);
     const placed = day && (dayLayouts.get(day.start_ms)?.placed ?? day.placed);
     const active = placed?.find(p => p.idx === hover.idx);
@@ -2253,13 +2259,18 @@
             && hoverContext.peers.some(peer => peer.idx === p.idx)}
           onopen={openPopover}
           onedit={(ev, r) => { if (!ev.pending) openPopover(ev, r, true); }}
-          ongrab={(ev, e) => {
-            // A card still saving is not grabbed (pending-changes spec §2.6).
-            // The flag is cleared as `startDrag`'s combined-block branch does:
-            // this press starts no drag, so no release would clear it, and
-            // the click that opens this card's details would be swallowed.
-            if (ev.pending) { draggedNotClicked = false; return; }
-            startDrag(ev, day, e);
+          ongrab={(ev, e, copy) => {
+            // A copy panel selects the write identity; the combined block
+            // remains the preview identity, including for a non-primary copy.
+            const selected = copy ? { ...ev, ...copy, copies: undefined } : ev;
+            // A card still saving or a read-only copy is not grabbed. Clear
+            // a cancelled gesture's click guard because no release will do it.
+            if (ev.pending || isPending(selected.id, selected.start_ms)
+              || (copy && !e.altKey && !writableCalendars(calendars).some(c => c.id === copy.calendar_id))) {
+              draggedNotClicked = false;
+              return;
+            }
+            startDrag(selected, day, e, ev);
           }}
           preview={previewFor(day.events[p.idx])}
           liveSpan={liveSpanFor(day.events[p.idx])}
