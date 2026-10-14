@@ -133,7 +133,7 @@ test('a sync reorder keeps hover with the same shared occurrence', async ({ page
 });
 
 for (const destination of ['outside', 'neighbor'] as const) {
-  test(`releasing a shared-copy drag ${destination} does not leave a second expansion`, async ({ page }) => {
+  test(`cancelling a shared-copy drag ${destination} does not leave a second expansion`, async ({ page }) => {
     const { shared, peer } = await setup(page, true);
     const box = (await shared.boundingBox())!;
     const peerBox = (await peer.boundingBox())!;
@@ -145,6 +145,8 @@ for (const destination of ['outside', 'neighbor'] as const) {
     const to = destination === 'outside' ? { x: 0, y: 0 }
       : { x: peerBox.x + peerBox.width / 2, y: peerBox.y + peerBox.height / 2 };
     await page.mouse.move(to.x, to.y, { steps: 5 });
+    await expect(shared).toHaveClass(/dragging/);
+    await page.keyboard.press('Escape');
     await page.mouse.up();
     await page.mouse.move(to.x + 1, to.y + 1);
     await expect(page.locator('.copy-panels')).toHaveCount(0);
