@@ -201,6 +201,21 @@ mod tests {
         assert!(SKILL_MD.len() > 2_000, "a real skill, not a stub");
     }
 
+    /// Every frontmatter value is a plain YAML scalar a strict parser takes
+    /// (issue #159): Pi refused `(v0.7+) writes: create …` as a nested
+    /// mapping and never registered `/skill:omacal`, while Claude Code read
+    /// it leniently. Plain rather than quoted, so line-by-line readers see
+    /// the same text the YAML parsers do.
+    #[test]
+    fn the_frontmatter_is_strict_yaml() {
+        let front = SKILL_MD.strip_prefix("---\n").and_then(|s| s.split_once("\n---\n")).unwrap().0;
+        for line in front.lines() {
+            let (key, value) = line.split_once(": ").unwrap_or_else(|| panic!("not `key: value`: {line}"));
+            assert!(!value.contains(": ") && !value.contains(" #"), "{key} would not parse as YAML: {value}");
+            assert!(!value.starts_with(|c| "-?:,[]{}#&*!|>'\"%@`".contains(c)), "{key} starts with a YAML indicator");
+        }
+    }
+
     /// A fresh home: canonical copy written and marked; no `~/.claude`
     /// means no link and no error — absence of an agent is not a fault.
     #[test]

@@ -1,6 +1,6 @@
 ---
 name: omacal
-description: The user's real calendar (Google, iCloud, CalDAV, WebCal subscriptions) through the omacal CLI — today's agenda, events in a date range, title search, the calendar list, and (v0.7+) writes: create (one-off or repeating), reschedule, answer and delete events. Use whenever the user asks what is on their calendar, when they are free or busy, or asks to add, move, cancel or answer a meeting from the terminal.
+description: The user's real calendar (Google, iCloud, CalDAV, WebCal subscriptions) through the omacal CLI — today's agenda, events in a date range, title search, the calendar list, and (v0.7+) writes, to create (one-off or repeating), reschedule, answer and delete events. Use whenever the user asks what is on their calendar, when they are free or busy, or asks to add, move, cancel or answer a meeting from the terminal.
 ---
 
 # omacal calendar
