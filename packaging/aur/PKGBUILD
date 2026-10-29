@@ -7,7 +7,7 @@
 # their own Google Cloud project — the experience this package exists to
 # remove.
 pkgname=omacal
-pkgver=6.0.1
+pkgver=6.1.0
 pkgrel=1
 pkgdesc="Minimalist open-source Google Calendar client, built for Omarchy"
 arch=('x86_64')
@@ -19,7 +19,7 @@ options=('!strip' '!debug')
 source=("${pkgname}-${pkgver}.deb::https://github.com/x3me/omacal/releases/download/v${pkgver}/omacal_${pkgver}_amd64.deb"
         "LICENSE-${pkgver}::https://raw.githubusercontent.com/x3me/omacal/v${pkgver}/LICENSE")
 noextract=("${pkgname}-${pkgver}.deb")
-sha256sums=('0d4a40abedfb9df34978cc0eaf3ac6950446372af7cd4770e3776cb858a95905'
+sha256sums=('ff9f96f5753038650ce8e64a7ab4711402e7912036f0b5cbf7afd4d62329eda6'
             '6d6c6bf89ad055436e423034485b18882a00ce3a1aa0464a3377d2f0c6d9f622')
 
 package() {
