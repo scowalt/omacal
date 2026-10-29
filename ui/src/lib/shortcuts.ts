@@ -78,6 +78,7 @@ export const SHORTCUTS = [
   { id: 'create',   key: 'n', label: 'n', group: 'Doing things', consumes: true },
   { id: 'quickCreate', key: 'q', label: 'q', group: 'Doing things', consumes: true },
   { id: 'list',     key: 'f', label: 'f', group: 'Doing things' },
+  { id: 'tasks',    key: 'x', label: 'x', group: 'Doing things' },
   { id: 'help',     key: '?', label: '?', group: 'Doing things' },
 ] as const satisfies readonly Shortcut[];
 
@@ -115,6 +116,7 @@ export const SHORTCUT_TEXT: Record<ShortcutId, string> = {
   deleteSelected: 'Delete the selected event (asks first)',
   create: 'New event',
   list: 'Switch between the grid and the list',
+  tasks: 'Show or hide Tasks',
   help: 'This list',
 };
 

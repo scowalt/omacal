@@ -110,6 +110,19 @@ test.describe('App', () => {
     await expect(page.getByRole('complementary', { name: 'Tasks' })).toBeVisible();
   });
 
+  /** #165: the Tasks pane on a key, like every other place in the app. `x`,
+   *  what goes in a checkbox; it toggles, as Menu → Tasks… does. */
+  test('X opens the Tasks pane, and X again closes it', async ({ page }) => {
+    await page.goto(app());
+    await expect(page.locator('.vswitch button')).toHaveCount(5);
+    const side = page.getByRole('complementary', { name: 'Tasks' });
+    await expect(side).toHaveCount(0);
+    await page.keyboard.press('x');
+    await expect(side).toBeVisible();
+    await page.keyboard.press('x');
+    await expect(side).toHaveCount(0);
+  });
+
   /** #138: the whole interface's size, for a screen whose scaling does not
    *  reach the app. Stored on release, not while the slider moves (zooming
    *  under the hand would move the slider itself), and one press back. */

@@ -2360,6 +2360,8 @@
     // no-op in Year and Big Year, where the control it duplicates is absent —
     // see `toggleList`.
     list: toggleList,
+    // `X`, what goes in a checkbox (#165). Toggles, as Menu → Tasks… does.
+    tasks: () => (tasksOpen = !tasksOpen),
     help: () => (helpOpen = true),
   };
 
