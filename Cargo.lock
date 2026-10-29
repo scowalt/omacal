@@ -3139,7 +3139,7 @@ dependencies = [
 
 [[package]]
 name = "omacal"
-version = "6.0.1"
+version = "6.1.0"
 dependencies = [
  "anyhow",
  "block2",
