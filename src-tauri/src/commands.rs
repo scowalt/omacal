@@ -966,6 +966,32 @@ mod tests {
         }
     }
 
+    /// #158's own fixture, end to end: an Outlook feed in "India Standard
+    /// Time", parsed, stored as a WebCal sync stores it on a calendar in
+    /// Stockholm, and expanded for the week of 12 October 2026. 18:00 and
+    /// 14:00 IST are 12:30Z and 08:30Z, not 18:00 and 14:00 Stockholm.
+    #[test]
+    fn an_outlook_feed_in_a_windows_zone_lands_at_the_right_instant() {
+        let feed = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VTIMEZONE\r\nTZID:India Standard Time\r\n\
+            BEGIN:STANDARD\r\nDTSTART:16010101T000000\r\nTZOFFSETFROM:+0530\r\nTZOFFSETTO:+0530\r\nEND:STANDARD\r\n\
+            END:VTIMEZONE\r\nBEGIN:VEVENT\r\nUID:monday\r\nDTSTAMP:20261001T000000Z\r\nSUMMARY:Monday\r\n\
+            DTSTART;TZID=India Standard Time:20260608T180000\r\nDTEND;TZID=India Standard Time:20260608T183000\r\n\
+            RRULE:FREQ=WEEKLY;UNTIL=20271011T123000Z;INTERVAL=1;BYDAY=MO;WKST=MO\r\nEND:VEVENT\r\n\
+            BEGIN:VEVENT\r\nUID:wednesday\r\nDTSTAMP:20261001T000000Z\r\nSUMMARY:Wednesday\r\n\
+            DTSTART;TZID=India Standard Time:20260923T140000\r\nDTEND;TZID=India Standard Time:20260923T143000\r\n\
+            RRULE:FREQ=WEEKLY;UNTIL=20271006T083000Z;INTERVAL=1;BYDAY=WE;WKST=MO\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        const SUN_OCT11: i64 = 1_791_676_800_000;
+        const SUN_OCT18: i64 = 1_792_281_600_000;
+        let root = omacal_caldav::ics::parse(feed).unwrap();
+        let starts: Vec<i64> = omacal_caldav::ics::events_in(&root)
+            .iter()
+            .map(|ev| omacal_sync::caldav::caldav_to_stored(ev, 1, "Europe/Stockholm", None, "").unwrap())
+            .flat_map(|stored| occurrences(&stored, SUN_OCT11, SUN_OCT18))
+            .map(|iv| iv.start_ms)
+            .collect();
+        assert_eq!(starts, vec![1_791_808_200_000, 1_791_966_600_000]);
+    }
+
     #[test]
     fn displayed_events_serialize_calendar_identity_for_hover_labels() {
         let mut source = ev("planning", MON + 9 * 3_600_000, MON + 10 * 3_600_000, false);

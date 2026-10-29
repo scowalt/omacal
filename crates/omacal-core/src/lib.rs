@@ -4,6 +4,7 @@ pub mod remind;
 pub mod recur;
 pub mod search;
 pub mod text;
+pub mod windows_zone;
 pub mod zone;
 
 pub use lanes::{pack_lanes, Lane, Segment};

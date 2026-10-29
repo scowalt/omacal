@@ -258,9 +258,11 @@ pub fn parse_time(p: &Property) -> Option<IcsTime> {
 }
 
 /// Resolves a shape to `(epoch_ms, tz_name, is_all_day)` against the
-/// calendar's zone. A TZID jiff does not know (a Windows zone name, a private
-/// Apple alias) falls back to the calendar's zone rather than dropping the
-/// event — a meeting an hour off beats a meeting missing.
+/// calendar's zone. A Windows zone name (Outlook's `India Standard Time`,
+/// #158) resolves in its IANA zone, which is the name handed on. Any other
+/// TZID jiff does not know (a private Apple alias, Outlook's `Customized Time
+/// Zone`) falls back to the calendar's zone rather than dropping the event —
+/// a meeting an hour off beats a meeting missing.
 pub fn resolve(t: &IcsTime, cal_tz: &str) -> Option<(i64, String, bool)> {
     match t {
         IcsTime::Date(d) => {
@@ -271,6 +273,10 @@ pub fn resolve(t: &IcsTime, cal_tz: &str) -> Option<(i64, String, bool)> {
         IcsTime::Zoned { dt, tzid } => match dt.in_tz(tzid) {
             Ok(z) => Some((z.timestamp().as_millisecond(), tzid.clone(), false)),
             Err(_) => {
+                if let Some(iana) = omacal_core::windows_zone::iana_for_windows(tzid) {
+                    let z = dt.in_tz(iana).ok()?;
+                    return Some((z.timestamp().as_millisecond(), iana.to_string(), false));
+                }
                 tracing::warn!(%tzid, "unknown TZID; resolving in the calendar's zone");
                 let z = dt.in_tz(cal_tz).ok()?;
                 Some((z.timestamp().as_millisecond(), cal_tz.to_string(), false))
@@ -1951,6 +1957,23 @@ mod tests {
         let t = parse_time(&p).unwrap();
         let (_, tz, _) = resolve(&t, "Europe/Sofia").unwrap();
         assert_eq!(tz, "Europe/Sofia");
+    }
+
+    /// Outlook publishes Windows zone names (#158): 18:00 "India Standard
+    /// Time" is 12:30Z, whatever the calendar's own zone, and the series
+    /// zone handed on to the expander is the IANA one.
+    #[test]
+    fn windows_tzids_resolve_in_their_own_zone() {
+        let at = |tzid: &str, value: &str| Property {
+            name: "DTSTART".into(),
+            params: vec![("TZID".into(), tzid.into())],
+            value: value.into(),
+        };
+        let t = parse_time(&at("India Standard Time", "20261012T180000")).unwrap();
+        assert_eq!(resolve(&t, "Europe/Stockholm"), Some((1_791_808_200_000, "Asia/Kolkata".to_string(), false)));
+        // A zone with summer time: 09:00 in Berlin on 2026-07-01 is 07:00Z.
+        let t = parse_time(&at("W. Europe Standard Time", "20260701T090000")).unwrap();
+        assert_eq!(resolve(&t, "Asia/Kolkata"), Some((1_782_889_200_000, "Europe/Berlin".to_string(), false)));
     }
 
     #[test]

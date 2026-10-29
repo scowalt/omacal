@@ -1,4 +1,5 @@
 use crate::layout::Interval;
+use crate::windows_zone::iana_for_windows;
 use crate::zone::{date_in_zone, midnight_in_zone};
 use chrono::TimeZone;
 use rrule::{RRuleSet, Tz};
@@ -88,6 +89,23 @@ fn dtstart_line(series: &Series, zone: chrono_tz::Tz) -> Result<String, RecurErr
     ))
 }
 
+/// `line` with a Windows `TZID` (Outlook's `EXDATE;TZID=India Standard
+/// Time:…`, #158) swapped for its IANA zone, the only names `rrule` knows.
+/// The stored line stays as the server wrote it; this is the expander's copy.
+fn with_iana_tzid(line: &str) -> std::borrow::Cow<'_, str> {
+    let Some(at) = line.find("TZID=") else { return line.into() };
+    let start = at + "TZID=".len();
+    let quoted = line[start..].starts_with('"');
+    let name_start = start + usize::from(quoted);
+    let len = line[name_start..].find(|c| if quoted { c == '"' } else { c == ';' || c == ':' });
+    let Some(len) = len else { return line.into() };
+    let name_end = name_start + len;
+    match iana_for_windows(&line[name_start..name_end]) {
+        Some(iana) => format!("{}{iana}{}", &line[..start], &line[name_end + usize::from(quoted)..]).into(),
+        None => line.into(),
+    }
+}
+
 /// Expands `series` into concrete intervals overlapping `[from_ms, to_ms)`.
 ///
 /// `limit` bounds the number of occurrences generated, guarding against
@@ -122,7 +140,7 @@ pub fn expand(
     source.push_str(&dtstart);
     for line in series.recurrence {
         source.push('\n');
-        source.push_str(line.trim());
+        source.push_str(&with_iana_tzid(line.trim()));
     }
 
     let set = RRuleSet::from_str(&source)
@@ -528,5 +546,39 @@ mod tests {
         assert_eq!(out.len(), 2, "the excluded instance should not be produced");
         let excluded_start = ALL_DAY_AUG3_SOFIA + DAY; // Aug 4 midnight Sofia
         assert!(out.iter().all(|i| i.start_ms != excluded_start));
+    }
+
+    /// Outlook writes Windows zone names into `EXDATE;TZID=…` too (#158).
+    /// Stored verbatim, they reached `rrule`, which knows only IANA names.
+    #[test]
+    fn an_exdate_in_a_windows_zone_is_excluded() {
+        const MON_OCT12_1230Z: i64 = 1_791_808_200_000; // 18:00 India Standard Time
+        let recurrence = vec![
+            "RRULE:FREQ=WEEKLY;BYDAY=MO".to_string(),
+            "EXDATE;TZID=India Standard Time:20261019T180000".to_string(),
+        ];
+        let series = Series {
+            dtstart_ms: MON_OCT12_1230Z,
+            dtstart_tz: "Asia/Kolkata",
+            duration_ms: HOUR / 2,
+            is_all_day: false,
+            recurrence: &recurrence,
+        };
+        let out = expand(&series, MON_OCT12_1230Z - DAY, MON_OCT12_1230Z + 15 * DAY, 64).unwrap().intervals;
+        let starts: Vec<i64> = out.iter().map(|i| i.start_ms).collect();
+        assert_eq!(starts, vec![MON_OCT12_1230Z, MON_OCT12_1230Z + 14 * DAY]);
+    }
+
+    #[test]
+    fn only_a_windows_tzid_is_rewritten() {
+        assert_eq!(with_iana_tzid("EXDATE;TZID=India Standard Time:20261019T180000"), "EXDATE;TZID=Asia/Kolkata:20261019T180000");
+        assert_eq!(with_iana_tzid("EXDATE;TZID=\"India Standard Time\":20261019T180000"), "EXDATE;TZID=Asia/Kolkata:20261019T180000");
+        assert_eq!(
+            with_iana_tzid("RDATE;TZID=W. Europe Standard Time;VALUE=DATE-TIME:20261019T180000"),
+            "RDATE;TZID=Europe/Berlin;VALUE=DATE-TIME:20261019T180000"
+        );
+        for kept in ["RRULE:FREQ=WEEKLY;BYDAY=MO", "EXDATE;TZID=Europe/Sofia:20260804T090000", "EXDATE;TZID=Customized Time Zone:20261019T180000"] {
+            assert_eq!(with_iana_tzid(kept), kept);
+        }
     }
 }
