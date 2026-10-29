@@ -103,6 +103,11 @@ pub(crate) const MENUBAR_LABEL_FORMAT_KEY: &str = "menubar_label_format";
 pub(crate) const MENUBAR_DAY_VIEW_KEY: &str = "menubar_day_view";
 pub(crate) const MENUBAR_LABEL_KEY: &str = "menubar_label";
 pub(crate) const MENUBAR_JOIN_MINUTES_KEY: &str = "menubar_join_minutes";
+const MENUBAR_LABEL_HOURS_KEY: &str = "menubar_label_hours";
+/// How far ahead the bar's label may name the next meeting (#167): a day
+/// unless chosen, and only these spans. Two weeks is all the feed carries.
+pub(crate) const DEFAULT_LABEL_HOURS: u32 = 24;
+const LABEL_HOURS: [u32; 7] = [1, 4, 12, 24, 72, 168, 336];
 pub(crate) const MENUBAR_EARLIER_KEY: &str = "menubar_earlier";
 pub(crate) const MENUBAR_TOMORROW_KEY: &str = "menubar_tomorrow";
 pub(crate) const MENUBAR_DAYS_AHEAD_KEY: &str = "menubar_days_ahead";
@@ -542,6 +547,9 @@ pub struct AppSettings {
     pub menubar_day_view: bool,
     pub menubar_label: bool,
     pub menubar_join_minutes: u32,
+    /// How far ahead the label names the next meeting, in hours (#167). A
+    /// meeting you are in, or can already join, is named regardless.
+    pub menubar_label_hours: u32,
     /// The three choices the agenda popups (Omarchy widget, macOS menu bar)
     /// leave to the user — see `Timeline.agendaSections`, which both surfaces
     /// share. Today is always shown in full and is not a choice.
@@ -883,6 +891,8 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         menubar_label: read(pool, MENUBAR_LABEL_KEY).await.as_deref() != Some("0"),
         menubar_join_minutes: read(pool, MENUBAR_JOIN_MINUTES_KEY).await
             .and_then(|v| v.parse().ok()).filter(|v| *v <= 60).unwrap_or(5),
+        menubar_label_hours: read(pool, MENUBAR_LABEL_HOURS_KEY).await
+            .and_then(|v| v.parse().ok()).filter(|v| LABEL_HOURS.contains(v)).unwrap_or(DEFAULT_LABEL_HOURS),
         menubar_earlier: match read(pool, MENUBAR_EARLIER_KEY).await.as_deref() {
             Some("off") => MenubarEarlier::Off,
             _ => MenubarEarlier::Folded,
@@ -1470,7 +1480,7 @@ pub enum Setting {
     MenubarDateFormat { format: String, custom: String },
     /// The widget's and popup's shared choices, stored as one.
     #[serde(rename_all = "camelCase")]
-    MenubarPreferences { day_view: bool, label: bool, join_minutes: u32 },
+    MenubarPreferences { day_view: bool, label: bool, join_minutes: u32, label_hours: u32 },
     /// The popup's own switch, alone, so it cannot write label/Join settings
     /// from an old feed.
     MenubarDayView(bool),
@@ -1695,9 +1705,12 @@ pub(crate) async fn store(pool: &SqlitePool, setting: &Setting) -> Result<(), Se
             write_all(pool, &[(MENUBAR_DATE_FORMAT_KEY, format), (MENUBAR_DATE_CUSTOM_KEY, custom)])
                 .await?;
         }
-        S::MenubarPreferences { day_view, label, join_minutes } => {
+        S::MenubarPreferences { day_view, label, join_minutes, label_hours } => {
             if *join_minutes > 60 {
                 return Err(refused("Choose a Join window from 0 to 60 minutes."));
+            }
+            if !LABEL_HOURS.contains(label_hours) {
+                return Err(refused("Choose one of the offered spans for the next meeting."));
             }
             write_all(
                 pool,
@@ -1705,6 +1718,7 @@ pub(crate) async fn store(pool: &SqlitePool, setting: &Setting) -> Result<(), Se
                     (MENUBAR_DAY_VIEW_KEY, flag(*day_view)),
                     (MENUBAR_LABEL_KEY, flag(*label)),
                     (MENUBAR_JOIN_MINUTES_KEY, &join_minutes.to_string()),
+                    (MENUBAR_LABEL_HOURS_KEY, &label_hours.to_string()),
                 ],
             )
             .await?;
@@ -1837,8 +1851,8 @@ mod tests {
             Setting::AppearancePreferences { inactive_background_transparency: None, .. }
         ));
         assert!(matches!(
-            read(json!({"key": "menubarPreferences", "value": {"dayView": true, "label": false, "joinMinutes": 5}})),
-            Setting::MenubarPreferences { day_view: true, label: false, join_minutes: 5 }
+            read(json!({"key": "menubarPreferences", "value": {"dayView": true, "label": false, "joinMinutes": 5, "labelHours": 12}})),
+            Setting::MenubarPreferences { day_view: true, label: false, join_minutes: 5, label_hours: 12 }
         ));
         assert!(matches!(
             read(json!({"key": "menubarSections", "value": {"earlier": "off", "tomorrow": true, "daysAhead": 2}})),
@@ -1919,7 +1933,7 @@ mod tests {
     #[tokio::test]
     async fn popup_view_changes_preserve_label_and_join_preferences() {
         let p = pool().await;
-        store(&p, &Setting::MenubarPreferences { day_view: false, label: false, join_minutes: 15 }).await.unwrap();
+        store(&p, &Setting::MenubarPreferences { day_view: false, label: false, join_minutes: 15, label_hours: 24 }).await.unwrap();
         for day_view in [true, false] {
             store(&p, &Setting::MenubarDayView(day_view)).await.unwrap();
             let stored = read_settings(&p).await;
@@ -1936,15 +1950,30 @@ mod tests {
         assert!(!initial.menubar_day_view);
         assert!(initial.menubar_label);
         assert_eq!(initial.menubar_join_minutes, 5);
-        store(&p, &Setting::MenubarPreferences { day_view: true, label: false, join_minutes: 0 }).await.unwrap();
+        store(&p, &Setting::MenubarPreferences { day_view: true, label: false, join_minutes: 0, label_hours: 24 }).await.unwrap();
         let stored = read_settings(&p).await;
         assert!(stored.menubar_day_view);
         assert!(!stored.menubar_label);
         assert_eq!(stored.menubar_join_minutes, 0);
-        assert!(store(&p, &Setting::MenubarPreferences { day_view: false, label: true, join_minutes: 61 }).await.is_err());
+        assert!(store(&p, &Setting::MenubarPreferences { day_view: false, label: true, join_minutes: 61, label_hours: 24 }).await.is_err());
         assert!(read_settings(&p).await.menubar_day_view);
-        store(&p, &Setting::MenubarPreferences { day_view: false, label: true, join_minutes: 60 }).await.unwrap();
+        store(&p, &Setting::MenubarPreferences { day_view: false, label: true, join_minutes: 60, label_hours: 24 }).await.unwrap();
         assert_eq!(read_settings(&p).await.menubar_join_minutes, 60);
+    }
+
+    /// #167: how far ahead the bar's label reaches for the next meeting. A
+    /// day unless chosen, one of the offered spans only, and a stray row
+    /// lands on the day.
+    #[tokio::test]
+    async fn the_label_horizon_is_a_day_unless_chosen_and_only_an_offered_span() {
+        let p = pool().await;
+        assert_eq!(read_settings(&p).await.menubar_label_hours, 24);
+        store(&p, &Setting::MenubarPreferences { day_view: false, label: true, join_minutes: 5, label_hours: 4 }).await.unwrap();
+        assert_eq!(read_settings(&p).await.menubar_label_hours, 4);
+        assert!(store(&p, &Setting::MenubarPreferences { day_view: false, label: true, join_minutes: 5, label_hours: 5 }).await.is_err());
+        assert_eq!(read_settings(&p).await.menubar_label_hours, 4, "a refusal stores nothing");
+        write(&p, MENUBAR_LABEL_HOURS_KEY, "999").await.unwrap();
+        assert_eq!(read_settings(&p).await.menubar_label_hours, 24);
     }
 
     /// A fresh install has written none of these, and that is the ordinary

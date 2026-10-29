@@ -361,7 +361,10 @@ pub(crate) fn menu_title(
     if feed.panel.as_ref().is_some_and(|p| !p.label) { return None; }
     let timed = || feed.events.iter().filter(|e| !e.all_day);
     let now = timed().find(|e| running(e, now_ms));
-    let next = || timed().find(|e| e.start_ms > now_ms);
+    // An upcoming meeting is named only within the label's horizon (#167).
+    let hours = feed.panel.as_ref().map_or(crate::settings::DEFAULT_LABEL_HOURS, |p| p.label_hours);
+    let horizon = i64::from(hours) * 3_600_000;
+    let next = || timed().find(|e| e.start_ms > now_ms).filter(|e| e.start_ms - now_ms <= horizon);
     let ev = crate::menubar::joinable(feed, now_ms).or(now).or_else(next)?;
     let title = ellipsize(ev.title.as_deref().unwrap_or(UNTITLED), TITLE_CAP);
     let minutes = ((if running(ev, now_ms) { ev.end_ms } else { ev.start_ms } - now_ms) + 59_999) / 60_000;
@@ -1053,7 +1056,7 @@ mod tests {
             truncated: false, day_start_ms: T0, day_end_ms: T0 + 86_400_000, date: "2026-08-29".into(),
             date_label: String::new(), utc_offset_seconds: 0, date_format: crate::settings::DateFormat::Locale,
             clocks: Default::default(), hours: Vec::new(), timezone: "UTC".into(),
-            time_format: TimeFormat::H24, day_view: false, label: false, join_minutes: 0,
+            time_format: TimeFormat::H24, day_view: false, label: false, join_minutes: 0, label_hours: 24,
             earlier: "folded".into(), tomorrow: true, days_ahead: 0, per_day: 6, events: Vec::new(),
         });
         assert!(crate::menubar::joinable(&f, T0 - 1).is_none());
@@ -1061,6 +1064,34 @@ mod tests {
         assert!(menu_title(&f, T0, &sofia(), TimeFormat::H24).is_none());
         f.panel.as_mut().unwrap().join_minutes = 60;
         assert!(crate::menubar::joinable(&f, T0 - 3_600_000).is_some());
+    }
+
+    /// #167: the title names an upcoming meeting only within the label's
+    /// horizon, a day unless chosen ("in 212h 23m" said nothing useful). A
+    /// meeting you are in is named however long it runs.
+    #[test]
+    fn a_meeting_beyond_the_label_horizon_leaves_the_title() {
+        const H: i64 = 3_600_000;
+        let far = feed(vec![ev("Far", T0 + 25 * H, T0 + 26 * H)]);
+        assert_eq!(menu_title(&far, T0, &sofia(), TimeFormat::H24), None);
+        let near = feed(vec![ev("Near", T0 + 23 * H, T0 + 24 * H)]);
+        assert!(menu_title(&near, T0, &sofia(), TimeFormat::H24).unwrap().starts_with("Near"));
+        let running = feed(vec![ev("Offsite", T0 - H, T0 + 48 * H), ev("Far", T0 + 25 * H, T0 + 26 * H)]);
+        assert!(menu_title(&running, T0, &sofia(), TimeFormat::H24).unwrap().starts_with("Offsite"));
+
+        let mut chosen = feed(vec![ev("Soon", T0 + 2 * H, T0 + 3 * H)]);
+        chosen.panel = Some(crate::upcoming::FeedPanel {
+            visible_start_ms: 0, visible_end_ms: 86400000,
+            agenda_days: Vec::new(),
+            label_format: crate::settings::DEFAULT_MENU_LABEL.into(),
+            truncated: false, day_start_ms: T0, day_end_ms: T0 + 86_400_000, date: "2026-08-29".into(),
+            date_label: String::new(), utc_offset_seconds: 0, date_format: crate::settings::DateFormat::Locale,
+            clocks: Default::default(), hours: Vec::new(), timezone: "UTC".into(),
+            time_format: TimeFormat::H24, day_view: false, label: true, join_minutes: 5, label_hours: 1,
+            earlier: "folded".into(), tomorrow: true, days_ahead: 0, per_day: 6, events: Vec::new(),
+        });
+        assert_eq!(menu_title(&chosen, T0, &sofia(), TimeFormat::H24), None, "the chosen hour, not the day");
+        assert!(menu_title(&chosen, T0 + H, &sofia(), TimeFormat::H24).is_some());
     }
 
     #[test]

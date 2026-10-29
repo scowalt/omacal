@@ -123,6 +123,29 @@ test('older feeds default to agenda and visible-hour bounds reject malformed ran
   } finally { rmSync(dir, {recursive: true, force: true}); }
 });
 
+// #167: the label's horizon reaches QML as hours, a whole number up to the
+// feed's two weeks; a feed without one is an older app's and still reads.
+test('the label horizon is whole hours within the feed, or absent', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'omacal-label-hours-'));
+  const path = join(dir, 'feed');
+  const panel = {events: [], label: true, day_start_ms: 0, day_end_ms: 86400000,
+    join_minutes: 5, clocks: {}, hours: []};
+  const read = (fields: Record<string, unknown>) => {
+    writeFileSync(path, JSON.stringify({events: [], panel: Object.assign({}, panel, fields)}));
+    return spawnSync('/usr/bin/python3', [helper, path], {timeout: 3000, encoding: 'utf8'});
+  };
+  try {
+    expect(read({}).status).toBe(0);
+    for (const label_hours of [1, 24, 336]) {
+      const result = read({label_hours});
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout).panel.label_hours).toBe(label_hours);
+    }
+    for (const label_hours of [0, 337, '24', 24.5, null, true])
+      expect(read({label_hours}).status, JSON.stringify(label_hours)).not.toBe(0);
+  } finally { rmSync(dir, {recursive: true, force: true}); }
+});
+
 test('combined calendar colors are bounded hex values before they reach QML', () => {
   const dir = mkdtempSync(join(tmpdir(), 'omacal-colors-'));
   const path = join(dir, 'feed');

@@ -13,6 +13,11 @@ export function joinable(events, now, minutes) {
       return aNext ? a.start_ms - b.start_ms : b.start_ms - a.start_ms;
     })[0] || null;
 }
+// The bar names an upcoming meeting only within `hours` of now (#167). A feed
+// without a horizon (an older app) keeps naming the next one, as before.
+export function withinLabelHorizon(event, now, hours) {
+  return !!event && (typeof hours !== 'number' || event.start_ms - now <= hours * 3600000);
+}
 // Lane packing uses the painted span: a readable minimum-height short event
 // must not cover the next event in its lane. Original times stay on `event`.
 export function layout(events, start, end, minimumDurationMs = 0) {

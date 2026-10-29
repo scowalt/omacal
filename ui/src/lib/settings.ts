@@ -200,6 +200,8 @@ export type AppSettings = {
   menubarDayView?: boolean;
   menubarLabel?: boolean;
   menubarJoinMinutes?: number;
+  /** How far ahead the bar names the next meeting, in hours (#167). */
+  menubarLabelHours?: number;
   /** The agenda popups' section choices — the Omarchy widget and the macOS
    *  menu bar alike, through the feed. Today is always shown and is not a
    *  choice; these are what comes before and after it. */
@@ -315,7 +317,7 @@ export type SettingValues = {
   showDate: boolean;
   menubarLabelFormat: string;
   menubarDateFormat: { format: AppSettings['menubarDateFormat']; custom: string };
-  menubarPreferences: { dayView: boolean; label: boolean; joinMinutes: number };
+  menubarPreferences: { dayView: boolean; label: boolean; joinMinutes: number; labelHours: number };
   menubarDayView: boolean;
   menubarSections: { earlier: 'folded' | 'off'; tomorrow: boolean; daysAhead: number };
   /** Clamped rather than refused: the value comes off a gesture. */

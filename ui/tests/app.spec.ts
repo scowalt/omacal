@@ -6706,6 +6706,28 @@ test.describe("App: showing today's date", () => {
     await expect(modal.getByTestId('settings-note')).toHaveCount(0);
   });
 
+  /** #167: how far ahead the bar names the next meeting. A day unless
+   *  chosen, saved with the other bar preferences. */
+  test('the bar names the next meeting only as far ahead as chosen', async ({ page }) => {
+    await page.goto(app('writable'));
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Menu bar' }).click();
+    const picker = modal.getByRole('combobox', { name: 'Show the next meeting within' });
+    await expect(picker).toHaveText(/24 hours/);
+    await picker.click();
+    await page.getByRole('listbox', { name: 'Show the next meeting within' }).getByRole('option', { name: '4 hours', exact: true }).click();
+    await expect(modal.getByTestId('menubar-horizon-note')).toHaveText('Saved');
+    const calls = await page.evaluate(() => window.__harness.settingValues('menubarPreferences'));
+    expect(calls).toEqual([{ dayView: false, label: true, joinMinutes: 5, labelHours: 4 }]);
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    await modal.getByRole('tab', { name: 'Menu bar' }).click();
+    await expect(picker).toHaveText(/4 hours/);
+  });
+
   test('menu bar label and Join timing are saved and remembered', async ({ page }) => {
     await page.goto(app('writable'));
     await page.getByRole('button', { name: 'Menu' }).click();
@@ -6716,8 +6738,8 @@ test.describe("App: showing today's date", () => {
     await modal.getByLabel('Show meeting title and countdown').uncheck();
     const calls = await page.evaluate(() => window.__harness.settingValues('menubarPreferences'));
     expect(calls).toEqual([
-      { dayView: false, label: true, joinMinutes: 15 },
-      { dayView: false, label: false, joinMinutes: 15 },
+      { dayView: false, label: true, joinMinutes: 15, labelHours: 24 },
+      { dayView: false, label: false, joinMinutes: 15, labelHours: 24 },
     ]);
     await page.keyboard.press('Escape');
     await page.getByRole('button', { name: 'Menu' }).click();
@@ -6739,9 +6761,9 @@ test.describe("App: showing today's date", () => {
     await modal.getByLabel('Show meeting title and countdown').uncheck();
     const calls = await page.evaluate(() => window.__harness.settingValues('menubarPreferences'));
     expect(calls).toEqual([
-      { dayView: true, label: true, joinMinutes: 5 },
-      { dayView: true, label: true, joinMinutes: 15 },
-      { dayView: true, label: false, joinMinutes: 15 },
+      { dayView: true, label: true, joinMinutes: 5, labelHours: 24 },
+      { dayView: true, label: true, joinMinutes: 15, labelHours: 24 },
+      { dayView: true, label: false, joinMinutes: 15, labelHours: 24 },
     ]);
     await page.keyboard.press('Escape');
     await page.getByRole('button', { name: 'Menu' }).click();

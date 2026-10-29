@@ -72,6 +72,8 @@ def read_feed(path):
             raise ValueError('invalid day clock')
         if not 0 < panel['day_end_ms'] - panel['day_start_ms'] <= 26 * 3600000 or not 0 <= panel['join_minutes'] <= 60:
             raise ValueError('invalid day bounds')
+        if 'label_hours' in panel and (type(panel['label_hours']) is not int or not 1 <= panel['label_hours'] <= 336):
+            raise ValueError('invalid label horizon')
         if 'visible_start_ms' in panel or 'visible_end_ms' in panel:
             if not all(type(panel.get(k)) is int for k in ('visible_start_ms', 'visible_end_ms')) or not panel['day_start_ms'] <= panel['visible_start_ms'] < panel['visible_end_ms'] <= panel['day_end_ms']:
                 raise ValueError('invalid visible hours')

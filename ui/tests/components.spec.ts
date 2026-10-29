@@ -1812,7 +1812,7 @@ test.describe('Header', () => {
 
     await expect(modal.locator('.acct')).toHaveText(['Google · me@x.com']);
     await expect(modal.getByRole('tabpanel').locator('.row')).toHaveCount(3);
-    await expect(modal.locator('.name')).toHaveText(['Personal', 'Team', 'Holidays in Bulgaria']);
+    await expect(modal.getByRole('tabpanel').locator('.name')).toHaveText(['Personal', 'Team', 'Holidays in Bulgaria']);
   });
 
   /**

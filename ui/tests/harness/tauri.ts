@@ -707,6 +707,7 @@ type StubSettings = {
   menubarEarlier?: 'folded' | 'off';
   menubarTomorrow?: boolean;
   menubarDaysAhead?: number;
+  menubarLabelHours?: number;
   hourHeight: number;
   tasksWidth: number;
   fallbackReminderMinutes: number[];
@@ -817,6 +818,7 @@ const DEFAULT_SETTINGS: StubSettings = {
   menubarEarlier: 'folded',
   menubarTomorrow: true,
   menubarDaysAhead: 0,
+  menubarLabelHours: 24,
   // The week omacal has always drawn, so every golden holds.
   weekStart: 'monday',
   weekStartsToday: false,
@@ -1246,7 +1248,7 @@ export function installTauriStub(scenario: string): Harness {
           // The grouped keys land in the fields they are grouped from.
           case 'menubarPreferences':
             settings = saveSettings({ ...settings, menubarDayView: value.dayView,
-              menubarLabel: value.label, menubarJoinMinutes: value.joinMinutes });
+              menubarLabel: value.label, menubarJoinMinutes: value.joinMinutes, menubarLabelHours: value.labelHours });
             return heldMenubar(key, { ...settings });
           case 'menubarSections':
             settings = saveSettings({ ...settings, menubarEarlier: value.earlier,

@@ -85,7 +85,10 @@ Panel {
     meetingWindows = current
     if (joinIntent && nowMs - joinIntent.at > 90000) joinIntent = null
   }
-  readonly property var barEvent: callEvent || runningEvent || nextEvent
+  // A meeting you can join or are in, else the next one if it is within the
+  // label's horizon (#167): a day unless chosen, so a quiet week leaves the bar.
+  readonly property var barEvent: callEvent || runningEvent
+    || (Timeline.withinLabelHorizon(nextEvent, nowMs, day ? day.label_hours : undefined) ? nextEvent : null)
   readonly property bool showLabel: !barVertical && (!day || day.label) && !!barEvent
   readonly property string barLabel: {
     if (!barEvent) return ""

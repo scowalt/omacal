@@ -5,6 +5,7 @@ export interface Event {
 }
 export function progress(event: Event, now: number): number;
 export function joinable<T extends Event>(events: T[], now: number, minutes: number): T | null;
+export function withinLabelHorizon(event: Event | null, now: number, hours: number | undefined): boolean;
 export function layout<T extends Event>(events: T[], start: number, end: number, minimumDurationMs?: number): {
   event: T; start: number; end: number; lane: number; lanes: number; top: number; height: number;
 }[];

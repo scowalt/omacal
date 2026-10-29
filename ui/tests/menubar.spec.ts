@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { layout, agendaSections, meetingLabel, countdownDuration, progress, joinable, uniqueAllDay, PER_DAY_CAP, type Event } from '../../packaging/omarchy-plugin/Timeline.mjs';
+import { layout, agendaSections, meetingLabel, countdownDuration, progress, joinable, uniqueAllDay, withinLabelHorizon, PER_DAY_CAP, type Event } from '../../packaging/omarchy-plugin/Timeline.mjs';
 const at = (hour: number) => Date.UTC(2026, 8, 7, hour);
 const event = (title: string, start: number, end: number, extra = {}): Event => ({
   title, start_ms: at(start), end_ms: at(end), all_day: false, ...extra,
@@ -25,6 +25,19 @@ test('back-to-back Join switches at the lead window and stays with the new call'
   expect(joinable(events, at(13) - 60000, 0)?.title).toBe('Current');
   expect(joinable(events, at(13), 0)?.title).toBe('Next');
   expect(joinable(events, at(14), 0)?.title).toBe('Later');
+});
+
+// #167: the bar names an upcoming meeting only within the chosen hours, so a
+// quiet week does not read "in 212h 23m". An older feed has no horizon and
+// keeps naming the next meeting, as it always did.
+test('the bar label reaches only as far ahead as the chosen hours', () => {
+  const H = 3_600_000, now = 1_000 * H;
+  const at = (start: number) => ({ title: 'x', start_ms: start, end_ms: start + H, all_day: false });
+  expect(withinLabelHorizon(at(now + 24 * H), now, 24)).toBe(true);
+  expect(withinLabelHorizon(at(now + 24 * H + 60_000), now, 24)).toBe(false);
+  expect(withinLabelHorizon(at(now + 2 * H), now, 1)).toBe(false);
+  expect(withinLabelHorizon(at(now + 300 * H), now, undefined)).toBe(true);
+  expect(withinLabelHorizon(null, now, 24)).toBe(false);
 });
 
 test('day layout preserves overlaps and frees lanes at exact boundaries', () => {

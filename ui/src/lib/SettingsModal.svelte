@@ -23,6 +23,7 @@
   } from './settings';
   import { formatClock, type TimeFormat } from './timefmt';
   import ThemePicker from './ThemePicker.svelte';
+  import ListPicker, { type ListChoice } from './ListPicker.svelte';
   import { appearancePreviews } from './settings';
   import type { Palette } from './theme';
   import type { TemperatureUnit } from './temperature';
@@ -115,7 +116,16 @@
   let formatNote = $state<{ text: string; kind: 'info' | 'error' } | null>(null);
   let viewNote = $state<{ text: string; kind: 'info' | 'error' } | null>(null);
   let joinNote = $state<{ text: string; kind: 'info' | 'error' } | null>(null);
+  let horizonNote = $state<{ text: string; kind: 'info' | 'error' } | null>(null);
   let menubarBusy = $state(false);
+  /** How far ahead the bar may name the next meeting (#167); the backend
+   *  refuses any other span. */
+  const LABEL_HORIZONS: ListChoice[] = [
+    { id: 1, name: '1 hour', color: null }, { id: 4, name: '4 hours', color: null },
+    { id: 12, name: '12 hours', color: null }, { id: 24, name: '24 hours', color: null },
+    { id: 72, name: '3 days', color: null }, { id: 168, name: 'A week', color: null },
+    { id: 336, name: '2 weeks', color: null },
+  ];
   /** The agenda popup's three section choices, saved together like the label
    *  and Join window: the backend stores them in one transaction. `where`
    *  puts the answer beside the control that asked. */
@@ -190,15 +200,17 @@
     dayView = settings?.menubarDayView ?? false,
     label = settings?.menubarLabel ?? true,
     joinMinutes = settings?.menubarJoinMinutes ?? 5,
-    where: 'label' | 'join' | 'view' = 'label',
+    where: 'label' | 'join' | 'view' | 'horizon' = 'label',
+    labelHours = settings?.menubarLabelHours ?? 24,
   ) {
     const say = (n: { text: string; kind: 'info' | 'error' } | null) => {
-      if (where === 'label') labelNote = n; else if (where === 'view') viewNote = n; else joinNote = n;
+      if (where === 'label') labelNote = n; else if (where === 'view') viewNote = n;
+      else if (where === 'horizon') horizonNote = n; else joinNote = n;
     };
     menubarBusy = true;
     say({ text: 'Applying…', kind: 'info' });
     try {
-      settings = await setSetting('menubarPreferences', { dayView, label, joinMinutes });
+      settings = await setSetting('menubarPreferences', { dayView, label, joinMinutes, labelHours });
       onsettingschange?.(settings);
       say({ text: 'Saved', kind: 'info' });
     } catch (e) { say({ text: String(e), kind: 'error' }); }
@@ -1623,6 +1635,21 @@
                   data-testid="menubar-label-note">{labelNote.text}</span>
           {/if}
         </div>
+        <!-- #167: a quiet week read "in 212h 23m". The spans are the ones the
+             backend accepts; the feed carries two weeks, so nothing reaches
+             further. -->
+        <span class="lab" aria-hidden="true">Show the next meeting within</span>
+        <div class="inline">
+          <ListPicker noDot label="Show the next meeting within" choices={LABEL_HORIZONS}
+            value={settings?.menubarLabelHours ?? 24}
+            disabled={!settings || menubarBusy || !(settings?.menubarLabel ?? true)}
+            onpick={(hours) => saveMenubar(undefined, undefined, undefined, 'horizon', hours ?? 24)} />
+          {#if horizonNote}
+            <span class="rownote" class:err={horizonNote.kind === 'error'}
+                  data-testid="menubar-horizon-note">{horizonNote.text}</span>
+          {/if}
+        </div>
+        <p class="hint">A meeting you are in, or can already join, shows either way.</p>
         <label class="lab" for="meeting-format">Meeting label format</label>
         <input id="meeting-format" class="format-template" type="text" maxlength="256"
                bind:value={meetingFormat} disabled={!settings || menubarBusy} />

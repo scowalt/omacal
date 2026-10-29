@@ -89,6 +89,9 @@ pub struct FeedPanel {
     pub label: bool,
     pub label_format: String,
     pub join_minutes: u32,
+    /// How far ahead the label names the next meeting (#167); both
+    /// renderers read it, so the bar and the menu-bar title agree.
+    pub label_hours: u32,
     /// The three section choices (`settings::AppSettings`), and the fixed
     /// per-day cap for days other than today — carried in the feed so both
     /// renderers cut at the same row and say "+N more" about the same N.
@@ -525,6 +528,7 @@ pub(crate) async fn current(pool: &SqlitePool, now_ms: i64) -> anyhow::Result<Fe
         time_format: settings.time_format, day_view: settings.menubar_day_view,
         label_format: settings.menubar_label_format.clone(),
         label: settings.menubar_label, join_minutes: settings.menubar_join_minutes,
+        label_hours: settings.menubar_label_hours,
         earlier: settings.menubar_earlier.as_str().into(), tomorrow: settings.menubar_tomorrow,
         days_ahead: settings.menubar_days_ahead, per_day: PER_DAY_CAP,
         events: day.events,
