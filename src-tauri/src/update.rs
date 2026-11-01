@@ -28,8 +28,16 @@ use tauri::{AppHandle, Manager};
 /// install script queries, so the app and the installer can never disagree
 /// about what "latest" means. Unauthenticated, rate-limited per IP at a
 /// level one request a day does not approach.
-pub(crate) const LATEST_RELEASE_ENDPOINT: &str =
-    "https://api.github.com/repos/x3me/omacal/releases/latest";
+///
+/// A fork that publishes its own builds names its own endpoint in
+/// `OMACAL_LATEST_RELEASE_ENDPOINT` at compile time, read the way the
+/// embedded client pair is (`lib.rs`), beside the updater endpoint in its
+/// tauri config — so the notice and the Update button agree on whose
+/// releases are "latest". Empty counts as unset.
+pub(crate) const LATEST_RELEASE_ENDPOINT: &str = match option_env!("OMACAL_LATEST_RELEASE_ENDPOINT") {
+    Some(endpoint) if !endpoint.is_empty() => endpoint,
+    _ => "https://api.github.com/repos/x3me/omacal/releases/latest",
+};
 
 /// Once a day. A release is a rare event and the endpoint is a shared,
 /// unauthenticated courtesy; polling it faster buys nothing but rate-limit
@@ -89,12 +97,19 @@ pub(crate) fn running_as_appimage() -> bool {
     std::env::var_os("APPIMAGE").is_some()
 }
 
-/// `Some((major, minor, patch))` for `"0.1.2"` or `"v0.1.2"`, `None` for
-/// anything else. Numeric, not lexical — `"0.1.10"` is newer than `"0.1.9"`
-/// and a string comparison says otherwise.
-fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
+/// `Some((major, minor, patch, fork))` for `"0.1.2"` or `"v0.1.2"`, and for a
+/// fork build's `"0.1.2-fork.7"`; `None` for anything else. Numeric, not
+/// lexical — `"0.1.10"` is newer than `"0.1.9"` and a string comparison says
+/// otherwise. `fork` orders the way semver orders a pre-release, which is how
+/// the updater plugin compares the same strings: builds of one version by
+/// their number, and every one of them below the plain version.
+fn parse_version(s: &str) -> Option<(u64, u64, u64, u64)> {
     let s = s.trim();
     let s = s.strip_prefix('v').unwrap_or(s);
+    let (s, fork) = match s.split_once("-fork.") {
+        Some((s, n)) => (s, n.parse::<u64>().ok()?),
+        None => (s, u64::MAX),
+    };
     let mut parts = s.split('.');
     let mut next = || parts.next()?.parse::<u64>().ok();
     let v = (next()?, next()?, next()?);
@@ -103,7 +118,7 @@ fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
     if parts.next().is_some() {
         return None;
     }
-    Some(v)
+    Some((v.0, v.1, v.2, fork))
 }
 
 /// Whether `latest_tag` names a strictly newer version than `current`.
@@ -379,6 +394,25 @@ mod tests {
             assert!(!newer_than("0.1.1", tag), "tag {tag:?} produced a notice");
         }
         assert!(!newer_than("not-a-version", "v99.0.0"));
+    }
+
+    /// A fork's builds are `-fork.N`, and each must announce the next or the
+    /// fork's installs never hear of an update. By N within a version, by
+    /// version across a rebase, and below the plain version — the order the
+    /// updater plugin's semver puts them in, so the banner never offers what
+    /// the button then calls "Already up to date".
+    #[test]
+    fn fork_builds_order_by_version_then_build_number() {
+        assert!(newer_than("6.1.0-fork.4", "v6.1.0-fork.5"));
+        assert!(newer_than("6.1.0-fork.9", "v6.1.0-fork.10"), "compared lexically");
+        assert!(newer_than("6.1.0-fork.12", "v6.1.1-fork.13"));
+        assert!(newer_than("6.1.0-fork.12", "v6.1.0"));
+        assert!(!newer_than("6.1.0-fork.5", "v6.1.0-fork.5"));
+        assert!(!newer_than("6.1.1-fork.5", "v6.1.0-fork.6"), "a rebase went backwards");
+        assert!(!newer_than("6.1.0", "v6.1.0-fork.5"));
+        for tag in ["v6.1.0-fork.", "v6.1.0-fork.x", "v6.1.0-fork.1.2", "v6.1.0-beta.1", "v6.1-fork.9"] {
+            assert!(!newer_than("6.1.0-fork.1", tag), "tag {tag:?} produced a notice");
+        }
     }
 
     /// The sentence in the header says "0.1.2", not "v0.1.2" — the tag's
