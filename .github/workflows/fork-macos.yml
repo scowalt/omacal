@@ -1,25 +1,30 @@
 # This fork's main, built for the two Macs it runs on — an M3 Pro MacBook Pro
-# and an A18 Pro MacBook Neo — and published as one rolling prerelease,
-# `fork-latest`. Fork-only: upstream never touches this file, so rebasing
-# main onto upstream never conflicts with it.
+# and an A18 Pro MacBook Neo — and published as this fork's latest release,
+# which the installed app updates itself from. Fork-only: upstream never
+# touches this file, so rebasing main onto upstream never conflicts with it.
 #
 # One aarch64-apple-darwin build serves both machines. Rust's default CPU for
 # that target is the M1, and both chips run everything an M1 does.
 #
-# How this differs from upstream's release.yml. Every difference is applied at
-# build time through a --config overlay, so no source file diverges from
-# upstream:
+# Each build is versioned `<upstream version>-fork.<run number>`, so every
+# build is newer than the last, and a rebase onto a newer upstream is newer
+# still. The run number belongs to this file: renaming it restarts the count,
+# and installed builds then see no update until reinstalled by hand.
+#
+# How this differs from upstream's release.yml. The differences are applied
+# at build time — a --config overlay and two compile-time variables — so no
+# source file diverges from upstream for them:
 #   - ad-hoc signed ("-"), not Developer ID: the fork has no Apple
 #     certificate. Downloads made with curl or gh carry no quarantine flag,
 #     so Gatekeeper never sees them; a browser download needs "Open Anyway"
 #     in System Settings > Privacy & Security.
-#   - no updater artifacts: those are signed with upstream's updater key,
-#     which the fork does not have.
-#   - the updater endpoint is this fork, which publishes no latest.json. The
-#     in-app "Update" button would otherwise replace this build with
-#     upstream's, dropping the fork's commits and the database migration one
-#     of them adds. The "newer version available" banner still reads
-#     upstream's releases, and that banner is the cue to rebase.
+#   - updates come from this fork. The updater endpoint and pubkey in the
+#     overlay are the fork's, and the update notice's endpoint is set by
+#     OMACAL_LATEST_RELEASE_ENDPOINT (src-tauri/src/update.rs). The
+#     TAURI_SIGNING_PRIVATE_KEY(+_PASSWORD) secrets are the fork's own key,
+#     whose public half is UPDATER_PUBKEY below. Losing that secret means a
+#     new key pair, and installed builds trust only the old one: they need
+#     one reinstall by hand.
 #
 # The Google OAuth pair arrives as the OMACAL_CLIENT_ID/SECRET repository
 # secrets (the same pair upstream's release builds embed), read at compile
@@ -33,13 +38,14 @@ on:
     workflows: [ci]
     types: [completed]
     branches: [main]
+  # From main it publishes; from any other branch it builds and checks only.
   workflow_dispatch:
 
 permissions:
   contents: write
 
-# Queued, not cancelled: a run cancelled between deleting the old release and
-# creating the new one would leave no release at all.
+# Queued, not cancelled: a run cancelled mid-publish could leave the
+# previous release deleted or the new one half-uploaded.
 concurrency:
   group: fork-macos
   cancel-in-progress: false
@@ -63,6 +69,7 @@ jobs:
     env:
       SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
       BUNDLE: target/aarch64-apple-darwin/release/bundle
+      UPDATER_PUBKEY: dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ0MjdENjNDRThFRDcwRTIKUldUaWNPM29QTlluUkgwYzgxbzNtLzAxTzVxRENiQmk2dmQyRDdEaVYwblNTeHQrcVRZNXFwbVEK
     steps:
       - uses: actions/checkout@v7
         with:
@@ -84,18 +91,35 @@ jobs:
 
       - run: npm --prefix ui ci
 
+      # Both places the version lives: tauri.conf.json (through the overlay)
+      # is what the app and the updater compare; Cargo.toml is what the CLI's
+      # `doctor` compares and what the skill refresh keys on.
+      - name: Fork version
+        run: |
+          base=$(jq -r .version src-tauri/tauri.conf.json)
+          version="$base-fork.$GITHUB_RUN_NUMBER"
+          sed -i '' "s/^version = \"$base\"$/version = \"$version\"/" src-tauri/Cargo.toml
+          grep -qx "version = \"$version\"" src-tauri/Cargo.toml || {
+            echo "src-tauri/Cargo.toml's version is not $base" >&2
+            exit 1
+          }
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "$version"
+
       - name: Fork overlay for tauri.conf.json
         run: |
           cat > "$RUNNER_TEMP/fork.conf.json" <<EOF
           {
+            "version": "$VERSION",
             "bundle": {
               "targets": ["app"],
-              "createUpdaterArtifacts": false,
+              "createUpdaterArtifacts": true,
               "macOS": { "signingIdentity": "-" }
             },
             "plugins": {
               "updater": {
-                "endpoints": ["https://github.com/$GITHUB_REPOSITORY/releases/download/fork-latest/latest.json"]
+                "pubkey": "$UPDATER_PUBKEY",
+                "endpoints": ["https://github.com/$GITHUB_REPOSITORY/releases/latest/download/latest.json"]
               }
             }
           }
@@ -108,6 +132,9 @@ jobs:
         env:
           OMACAL_CLIENT_ID: ${{ secrets.OMACAL_CLIENT_ID }}
           OMACAL_CLIENT_SECRET: ${{ secrets.OMACAL_CLIENT_SECRET }}
+          OMACAL_LATEST_RELEASE_ENDPOINT: https://api.github.com/repos/${{ github.repository }}/releases/latest
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           ui/node_modules/.bin/tauri build \
             --target aarch64-apple-darwin \
@@ -116,43 +143,82 @@ jobs:
       - name: Check the app
         run: |
           app="$BUNDLE/macos/OmaCal.app"
-          lipo -archs "$app/Contents/MacOS/omacal"
-          lipo -archs "$app/Contents/MacOS/omacal" | grep -qx arm64
+          bin="$app/Contents/MacOS/omacal"
+          lipo -archs "$bin"
+          lipo -archs "$bin" | grep -qx arm64
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign -dv "$app" 2>&1 | grep -q '^Signature=adhoc$'
+          shown=$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")
+          [ "$shown" = "$VERSION" ] || { echo "the app says $shown, not $VERSION" >&2; exit 1; }
+          grep -q "$VERSION" "$bin" || { echo "$VERSION is not compiled in" >&2; exit 1; }
           # Grepped, never printed. An app without the pair cannot sign in
           # on a Mac that has no ~/.config/omacal/config.toml.
-          if ! grep -q 'apps\.googleusercontent\.com' "$app/Contents/MacOS/omacal"; then
+          if ! grep -q 'apps\.googleusercontent\.com' "$bin"; then
             echo "no OAuth client compiled in; are the OMACAL_CLIENT_* secrets set?" >&2
             exit 1
           fi
+          # Both halves of the update check point here, not upstream.
+          grep -q "api.github.com/repos/$GITHUB_REPOSITORY/releases/latest" "$bin" || {
+            echo "the update notice does not read this fork's releases" >&2
+            exit 1
+          }
+          grep -q "github.com/$GITHUB_REPOSITORY/releases/latest/download/latest.json" "$bin" || {
+            echo "the updater does not read this fork's latest.json" >&2
+            exit 1
+          }
           echo "LSMinimumSystemVersion: $(plutil -extract LSMinimumSystemVersion raw "$app/Contents/Info.plist")"
 
-      # A zip rather than a dmg: one `ditto -x -k` installs it from a
-      # terminal, and the bundler's dmg step drives Finder over AppleScript,
-      # which is the flakiest thing a macOS runner does.
+      # The bundler only warns when the signing key is not the pubkey's pair,
+      # and the installed app would then refuse every update. Verified here
+      # against the pubkey the app was built with.
+      - name: Verify the update signature
+        run: |
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install minisign
+          echo "$UPDATER_PUBKEY" | base64 -d > "$RUNNER_TEMP/updater.pub"
+          base64 -d < "$BUNDLE/macos/OmaCal.app.tar.gz.sig" > "$RUNNER_TEMP/updater.minisig"
+          minisign -V -p "$RUNNER_TEMP/updater.pub" -x "$RUNNER_TEMP/updater.minisig" \
+            -m "$BUNDLE/macos/OmaCal.app.tar.gz"
+
+      # The zip is for installing by hand, where one `ditto -x -k` does it; the
+      # .app.tar.gz, its .sig and latest.json are what the updater reads.
       - name: Package
         run: |
           mkdir dist
           ditto -c -k --keepParent "$BUNDLE/macos/OmaCal.app" dist/omacal-fork-aarch64.app.zip
-          shasum -a 256 dist/omacal-fork-aarch64.app.zip
+          cp "$BUNDLE/macos/OmaCal.app.tar.gz" dist/omacal-fork-aarch64.app.tar.gz
+          cp "$BUNDLE/macos/OmaCal.app.tar.gz.sig" dist/omacal-fork-aarch64.app.tar.gz.sig
+          jq -n \
+            --arg version "$VERSION" \
+            --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg sig "$(cat dist/omacal-fork-aarch64.app.tar.gz.sig)" \
+            --arg url "https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION/omacal-fork-aarch64.app.tar.gz" \
+            '{version: $version, pub_date: $date, platforms: {"darwin-aarch64": {signature: $sig, url: $url}}}' \
+            > dist/latest.json
+          cat dist/latest.json
+          shasum -a 256 dist/*
 
-      - name: Publish the fork-latest prerelease
+      # One release at a time, as before: the new one goes up first, marked
+      # latest, and only then are the older fork releases and their tags
+      # removed. The tag is made with the workflow token, which starts no
+      # workflows, so release.yml's v* trigger does not fire for it.
+      - name: Publish the release
+        if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          version=$(jq -r .version src-tauri/tauri.conf.json)
-          url="https://github.com/$GITHUB_REPOSITORY/releases/download/fork-latest/omacal-fork-aarch64.app.zip"
+          url="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/omacal-fork-aarch64.app.zip"
           commits=$(gh api "repos/x3me/omacal/compare/main...${GITHUB_REPOSITORY%%/*}:${GITHUB_REPOSITORY#*/}:$SHA" \
             --jq '.commits[] | "- " + (.commit.message | split("\n")[0])')
           cat > "$RUNNER_TEMP/notes.md" <<EOF
-          OmaCal $version for Apple Silicon (M3 Pro, A18 Pro), built from \`${SHA:0:7}\`.
+          OmaCal $VERSION for Apple Silicon (M3 Pro, A18 Pro), built from \`${SHA:0:7}\`.
 
           On top of upstream [x3me/omacal](https://github.com/x3me/omacal) main:
 
           ${commits:-- nothing; this is upstream as-is}
 
-          Install or update (curl leaves no quarantine flag, so Gatekeeper does not block the ad-hoc signature):
+          Installed builds update themselves from this repository: the app shows a banner when a newer one is out, and its Update button installs it.
+
+          First install (curl leaves no quarantine flag, so Gatekeeper does not block the ad-hoc signature):
 
           \`\`\`sh
           curl -fL -o /tmp/omacal.zip $url
@@ -162,10 +228,15 @@ jobs:
 
           Each build has a new ad-hoc signature, so after an update macOS may ask whether OmaCal can use its saved Google sign-in in the Keychain. Choose **Always Allow**.
           EOF
-          gh release delete fork-latest --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
-          gh release create fork-latest dist/omacal-fork-aarch64.app.zip \
+          tag="v$VERSION"
+          gh release create "$tag" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --target "$SHA" \
-            --prerelease \
-            --title "OmaCal $version (fork @ ${SHA:0:7})" \
+            --latest \
+            --title "OmaCal $VERSION" \
             --notes-file "$RUNNER_TEMP/notes.md"
+          stale=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName --jq '.[].tagName' |
+            grep -E -e '-fork\.[0-9]+$' -e '^fork-latest$' | grep -vx "$tag" || true)
+          for old in $stale; do
+            gh release delete "$old" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+          done
