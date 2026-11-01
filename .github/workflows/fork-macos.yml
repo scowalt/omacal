@@ -1,0 +1,171 @@
+# This fork's main, built for the two Macs it runs on — an M3 Pro MacBook Pro
+# and an A18 Pro MacBook Neo — and published as one rolling prerelease,
+# `fork-latest`. Fork-only: upstream never touches this file, so rebasing
+# main onto upstream never conflicts with it.
+#
+# One aarch64-apple-darwin build serves both machines. Rust's default CPU for
+# that target is the M1, and both chips run everything an M1 does.
+#
+# How this differs from upstream's release.yml. Every difference is applied at
+# build time through a --config overlay, so no source file diverges from
+# upstream:
+#   - ad-hoc signed ("-"), not Developer ID: the fork has no Apple
+#     certificate. Downloads made with curl or gh carry no quarantine flag,
+#     so Gatekeeper never sees them; a browser download needs "Open Anyway"
+#     in System Settings > Privacy & Security.
+#   - no updater artifacts: those are signed with upstream's updater key,
+#     which the fork does not have.
+#   - the updater endpoint is this fork, which publishes no latest.json. The
+#     in-app "Update" button would otherwise replace this build with
+#     upstream's, dropping the fork's commits and the database migration one
+#     of them adds. The "newer version available" banner still reads
+#     upstream's releases, and that banner is the cue to rebase.
+#
+# The Google OAuth pair arrives as the OMACAL_CLIENT_ID/SECRET repository
+# secrets (the same pair upstream's release builds embed), read at compile
+# time exactly as in release.yml.
+
+name: fork-macos
+
+on:
+  # After ci passes on main, so a broken rebase never replaces a working build.
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Queued, not cancelled: a run cancelled between deleting the old release and
+# creating the new one would leave no release at all.
+concurrency:
+  group: fork-macos
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # Only a ci run from a push to this repository's own main counts. A
+    # workflow_run fires for pull_request runs too, including from other
+    # forks, and building their head here would hand that code the secrets
+    # and a write token.
+    if: >-
+      github.repository == 'scowalt/omacal' && (
+        github.event_name == 'workflow_dispatch' || (
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_repository.full_name == github.repository
+        )
+      )
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      BUNDLE: target/aarch64-apple-darwin/release/bundle
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SHA }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - run: npm --prefix ui ci
+
+      - name: Fork overlay for tauri.conf.json
+        run: |
+          cat > "$RUNNER_TEMP/fork.conf.json" <<EOF
+          {
+            "bundle": {
+              "targets": ["app"],
+              "createUpdaterArtifacts": false,
+              "macOS": { "signingIdentity": "-" }
+            },
+            "plugins": {
+              "updater": {
+                "endpoints": ["https://github.com/$GITHUB_REPOSITORY/releases/download/fork-latest/latest.json"]
+              }
+            }
+          }
+          EOF
+          cat "$RUNNER_TEMP/fork.conf.json"
+
+      # The CLI ui/package-lock.json pins, for release.yml's reason: a new
+      # bundler is a change made through the lockfile, not one a run picks up.
+      - name: Build the app
+        env:
+          OMACAL_CLIENT_ID: ${{ secrets.OMACAL_CLIENT_ID }}
+          OMACAL_CLIENT_SECRET: ${{ secrets.OMACAL_CLIENT_SECRET }}
+        run: |
+          ui/node_modules/.bin/tauri build \
+            --target aarch64-apple-darwin \
+            --config "$RUNNER_TEMP/fork.conf.json"
+
+      - name: Check the app
+        run: |
+          app="$BUNDLE/macos/OmaCal.app"
+          lipo -archs "$app/Contents/MacOS/omacal"
+          lipo -archs "$app/Contents/MacOS/omacal" | grep -qx arm64
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -dv "$app" 2>&1 | grep -q '^Signature=adhoc$'
+          # Grepped, never printed. An app without the pair cannot sign in
+          # on a Mac that has no ~/.config/omacal/config.toml.
+          if ! grep -q 'apps\.googleusercontent\.com' "$app/Contents/MacOS/omacal"; then
+            echo "no OAuth client compiled in; are the OMACAL_CLIENT_* secrets set?" >&2
+            exit 1
+          fi
+          echo "LSMinimumSystemVersion: $(plutil -extract LSMinimumSystemVersion raw "$app/Contents/Info.plist")"
+
+      # A zip rather than a dmg: one `ditto -x -k` installs it from a
+      # terminal, and the bundler's dmg step drives Finder over AppleScript,
+      # which is the flakiest thing a macOS runner does.
+      - name: Package
+        run: |
+          mkdir dist
+          ditto -c -k --keepParent "$BUNDLE/macos/OmaCal.app" dist/omacal-fork-aarch64.app.zip
+          shasum -a 256 dist/omacal-fork-aarch64.app.zip
+
+      - name: Publish the fork-latest prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(jq -r .version src-tauri/tauri.conf.json)
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/fork-latest/omacal-fork-aarch64.app.zip"
+          commits=$(gh api "repos/x3me/omacal/compare/main...${GITHUB_REPOSITORY%%/*}:${GITHUB_REPOSITORY#*/}:$SHA" \
+            --jq '.commits[] | "- " + (.commit.message | split("\n")[0])')
+          cat > "$RUNNER_TEMP/notes.md" <<EOF
+          OmaCal $version for Apple Silicon (M3 Pro, A18 Pro), built from \`${SHA:0:7}\`.
+
+          On top of upstream [x3me/omacal](https://github.com/x3me/omacal) main:
+
+          ${commits:-- nothing; this is upstream as-is}
+
+          Install or update (curl leaves no quarantine flag, so Gatekeeper does not block the ad-hoc signature):
+
+          \`\`\`sh
+          curl -fL -o /tmp/omacal.zip $url
+          pgrep -x omacal >/dev/null && osascript -e 'quit app "OmaCal"'; rm -rf /Applications/OmaCal.app
+          ditto -x -k /tmp/omacal.zip /Applications && open /Applications/OmaCal.app
+          \`\`\`
+
+          Each build has a new ad-hoc signature, so after an update macOS may ask whether OmaCal can use its saved Google sign-in in the Keychain. Choose **Always Allow**.
+          EOF
+          gh release delete fork-latest --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
+          gh release create fork-latest dist/omacal-fork-aarch64.app.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$SHA" \
+            --prerelease \
+            --title "OmaCal $version (fork @ ${SHA:0:7})" \
+            --notes-file "$RUNNER_TEMP/notes.md"
