@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# Launch, drive, inspect and tear down an isolated OmaCal for verification.
+# See ../SKILL.md. Every subcommand works from any directory inside the repo.
+set -euo pipefail
+
+REPO=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
+VERIFY_ID=com.omacal.verify                     # baked into the verify build
+VERIFY="$REPO/target/verify"
+BIN="$REPO/target/debug/omacal"
+AX="$VERIFY/bin/ax"
+CURRENT="$VERIFY/current"
+SI_SOCK="/tmp/${VERIFY_ID//./_}_si.sock"        # tauri-plugin-single-instance, macOS
+export PATH="$HOME/.cargo/bin:$PATH"
+
+die() { echo "omacal-verify: $*" >&2; exit 1; }
+
+run_dir() {
+  [[ -L "$CURRENT" && -d "$CURRENT" ]] || die "no live run (start one with: omacal-verify launch)"
+  cd -P "$CURRENT" && pwd
+}
+
+# The environment every process of a run shares: a scratch HOME (data dir,
+# skill install, Omarchy widget, and no reachable Keychain) and a short
+# runtime dir, because the CLI socket beside a deep worktree's data dir
+# exceeds SUN_LEN and silently fails to bind.
+with_env() {
+  local run; run=$(run_dir)
+  HOME="$run/home" XDG_RUNTIME_DIR="$(cat "$run/runtime")" "$@"
+}
+
+app_pid() { cat "$(run_dir)/app.pid"; }
+
+pid_is_ours() {
+  local pid=$1
+  kill -0 "$pid" 2>/dev/null && [[ "$(ps -o comm= -p "$pid")" == "$BIN" ]]
+}
+
+cmd_build() {
+  ( cd "$REPO"
+    [[ -d ui/node_modules ]] || npm --prefix ui ci
+    ui/node_modules/.bin/tauri build --debug --no-bundle --config "{\"identifier\":\"$VERIFY_ID\"}" )
+  mkdir -p "$VERIFY/bin"
+  swiftc -O -o "$AX" "$REPO/.claude/skills/verify/scripts/ax.swift"
+  echo "built $BIN and $AX"
+}
+
+cmd_launch() {
+  local mode=demo
+  case "${1:-}" in --local) mode=local ;; --demo|"") ;; *) die "launch [--demo|--local]" ;; esac
+  [[ -x "$BIN" && -x "$AX" ]] || die "nothing built yet: omacal-verify build"
+  grep -qa "$VERIFY_ID" "$BIN" || die "$BIN is not a verify build (identifier $VERIFY_ID missing); run: omacal-verify build"
+  if [[ -L "$CURRENT" ]] && [[ -f "$CURRENT/app.pid" ]] && pid_is_ours "$(cat "$CURRENT/app.pid")"; then
+    die "a verify instance is already running ($(cd -P "$CURRENT" && pwd)); drive it or run cleanup first"
+  fi
+  # Never probe it by connecting: a connection IS a message to the owner.
+  if [[ -n "$(lsof -t "$SI_SOCK" 2>/dev/null)" ]]; then
+    die "$SI_SOCK is held by pid $(lsof -t "$SI_SOCK"): a new instance would hand off to it and exit"
+  fi
+  rm -f "$SI_SOCK"
+
+  local run="$VERIFY/runs/$(date +%Y%m%d-%H%M%S)-$mode"
+  local data="$run/home/Library/Application Support"
+  mkdir -p "$data/com.omacal.app" "$run/evidence"
+  # The app derives its data dir from the identifier (com.omacal.verify); the
+  # CLI, the log and the socket fallback spell com.omacal.app by hand. One
+  # directory, two names.
+  ln -s com.omacal.app "$data/$VERIFY_ID"
+  # The CLI only ever opens omacal.db; demo mode writes omacal-demo.db.
+  [[ $mode == demo ]] && ln -s omacal-demo.db "$data/com.omacal.app/omacal.db"
+  mktemp -d /tmp/omv.XXXXXX > "$run/runtime"
+  echo "$mode" > "$run/mode"
+  ln -sfn "$run" "$CURRENT"
+
+  local demo=0
+  [[ $mode == demo ]] && demo=1
+  # Exec'd straight from the subshell, so $! is the app's own pid.
+  ( cd "$run"; HOME="$run/home" XDG_RUNTIME_DIR="$(cat "$run/runtime")" OMACAL_SEED_DEMO=$demo \
+      nohup "$BIN" > "$run/app.out" 2>&1 & echo $! > "$run/app.pid" )
+  local pid; pid=$(cat "$run/app.pid")
+
+  local log="$data/com.omacal.app/omacal.log" i
+  for i in $(seq 1 60); do
+    pid_is_ours "$pid" || { cat "$run/app.out" >&2; die "app exited during launch"; }
+    grep -q "CLI write socket up" "$log" 2>/dev/null && break
+    sleep 0.5
+  done
+  grep -q "CLI write socket up" "$log" 2>/dev/null || { tail -20 "$run/app.out" >&2; die "CLI socket never came up"; }
+  # The first AX query wakes WebKit's accessibility tree; the header's Quick
+  # add button is the sign the Svelte app has mounted and loaded.
+  "$AX" wait "$pid" "Quick add event" --timeout 30 > /dev/null || die "the UI never mounted"
+  echo "run:  $run"
+  echo "mode: $mode  pid: $pid"
+}
+
+cmd_doctor() {
+  local run pid ok=0; run=$(run_dir); pid=$(cat "$run/app.pid")
+  check() { if eval "$2" >/dev/null 2>&1; then echo "✓ $1"; else echo "✗ $1"; ok=1; fi; }
+  echo "run: $run ($(cat "$run/mode") mode)"
+  check "process $pid alive and is $BIN" "pid_is_ours $pid"
+  check "binary carries identifier $VERIFY_ID" "grep -qa $VERIFY_ID '$BIN'"
+  check "single-instance socket $SI_SOCK held by $pid" "[[ \$(lsof -t '$SI_SOCK') == $pid ]]"
+  check "CLI socket $(cat "$run/runtime")/omacal/ipc.sock held by $pid" "lsof -a -p $pid -U | grep -q '$(cat "$run/runtime")/omacal/ipc.sock'"
+  check "Accessibility trusted and UI mounted" "'$AX' find $pid 'Quick add event'"
+  if [[ $(cat "$run/mode") == demo ]]; then
+    check "DEMO DATA badge shown" "'$AX' find $pid 'DEMO DATA'"
+  fi
+  check "CLI reads the run's database" "with_env '$BIN' calendars --json | grep -q '\"ok\":true'"
+  return $ok
+}
+
+# Run the CLI in the run's environment; output also lands in evidence/.
+cmd_cli() {
+  local run n out; run=$(run_dir)
+  n=$(find "$run/evidence" -name 'cli-*.txt' | wc -l | tr -d ' ')
+  out="$run/evidence/cli-$(printf %02d $((n + 1))).txt"
+  { echo "\$ omacal $*"; } > "$out"
+  set +e; with_env "$BIN" "$@" 2>&1 | tee -a "$out"; local code=${PIPESTATUS[0]}; set -e
+  echo "[exit $code]" >> "$out"
+  return "$code"
+}
+
+cmd_ax() {
+  [[ $# -ge 1 ]] || die "ax dump|find|press|wait|type|key|focus [ARG] [flags]"
+  local verb=$1; shift
+  "$AX" "$verb" "$(app_pid)" "$@"
+}
+
+# A named snapshot: the AX tree, the log so far and, when this process may
+# record the screen, a PNG of the window.
+cmd_snap() {
+  [[ $# -eq 1 ]] || die "snap NAME"
+  local run pid; run=$(run_dir); pid=$(cat "$run/app.pid")
+  "$AX" dump "$pid" > "$run/evidence/$1.ax.txt"
+  cp "$run/home/Library/Application Support/com.omacal.app/omacal.log" "$run/evidence/$1.log"
+  local wid; wid=$("$AX" winid "$pid" 2>/dev/null || true)
+  printf '%s\n' "$run/evidence/$1.ax.txt" "$run/evidence/$1.log"
+  if [[ -n $wid ]] && screencapture -x -o -l "$wid" "$run/evidence/$1.png" 2>/dev/null; then
+    echo "$run/evidence/$1.png"
+  else
+    echo "(no PNG: grant this process Screen Recording to capture the window)" >&2
+  fi
+}
+
+cmd_cleanup() {
+  [[ -L "$CURRENT" ]] || { echo "nothing to clean up"; return 0; }
+  local run; run=$(cd -P "$CURRENT" && pwd)
+  if [[ -f "$run/app.pid" ]]; then
+    local pid; pid=$(cat "$run/app.pid")
+    if pid_is_ours "$pid"; then
+      # --quit travels the single-instance socket and exits the app cleanly
+      # (which also removes that socket); a signal is the fallback. Only from
+      # a verify build: a com.omacal.app binary's --quit reaches the user's
+      # installed OmaCal and quits THAT.
+      if grep -qa "$VERIFY_ID" "$BIN"; then
+        HOME="$run/home" XDG_RUNTIME_DIR="$(cat "$run/runtime")" "$BIN" --quit >/dev/null 2>&1 || true
+      fi
+      for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.25; done
+      kill -0 "$pid" 2>/dev/null && kill "$pid"
+      for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.25; done
+      kill -0 "$pid" 2>/dev/null && kill -9 "$pid"
+    fi
+  fi
+  [[ -f "$run/runtime" ]] && rm -rf "$(cat "$run/runtime")"
+  rm -rf "$run/home" "$run/runtime" "$run/app.pid"
+  rm -f "$CURRENT"
+  # The plugin removes its socket on a clean exit; a SIGKILL leaves it behind.
+  [[ -n "$(lsof -t "$SI_SOCK" 2>/dev/null)" ]] || rm -f "$SI_SOCK"
+  echo "evidence kept: $run/evidence"
+}
+
+case "${1:-}" in
+  build) shift; cmd_build "$@" ;;
+  launch) shift; cmd_launch "$@" ;;
+  doctor) shift; cmd_doctor "$@" ;;
+  cli) shift; cmd_cli "$@" ;;
+  ax) shift; cmd_ax "$@" ;;
+  snap) shift; cmd_snap "$@" ;;
+  env) shift; with_env "$@" ;;
+  run) run_dir ;;
+  cleanup) shift; cmd_cleanup "$@" ;;
+  *) die "usage: omacal-verify build|launch [--demo|--local]|doctor|cli ARGS|ax VERB ARGS|snap NAME|env CMD|run|cleanup" ;;
+esac
