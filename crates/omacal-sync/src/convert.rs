@@ -133,6 +133,7 @@ pub fn to_stored(ev: &Event, calendar_id: i64, cal_tz: &str) -> Option<StoredEve
         id: 0,
         calendar_id,
         google_id: ev.id.clone(),
+        google_event_type: ev.event_type.clone(),
         summary: ev.summary.clone(),
         location: ev.location.clone(),
         start_utc,
@@ -213,6 +214,7 @@ pub fn to_cancelled_exception(ev: &Event, calendar_id: i64, cal_tz: &str) -> Opt
         id: 0,
         calendar_id,
         google_id: ev.id.clone(),
+        google_event_type: ev.event_type.clone(),
         summary: ev.summary.clone(),
         location: None,
         start_utc,
@@ -276,7 +278,7 @@ mod tests {
 
     fn timed(start: &str, end: &str) -> Event {
         Event {
-            id: "e1".into(), status: "confirmed".into(), etag: None, ical_uid: None,
+            id: "e1".into(), event_type: None, status: "confirmed".into(), etag: None, ical_uid: None,
             summary: Some("Standup".into()), description: None, location: Some("Meet".into()),
             start: EventDateTime { date_time: Some(start.into()), date: None,
                                    time_zone: Some("Europe/Sofia".into()) },

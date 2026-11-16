@@ -828,7 +828,7 @@
     busy = true;
     error = null;
     try {
-      const detail = await getEventDetail(event.id);
+      const detail = await getEventDetail(event.id, event.start_ms, event.end_ms);
       const stillSelected = eventAtCursor(keyboardDays, keyboardCursor);
       if (!stillSelected || stillSelected.id !== event.id
           || stillSelected.start_ms !== event.start_ms) return;
@@ -1791,7 +1791,7 @@
     // guarded.
     const mine = () => gridSelId === id && gridSelStart === startMs;
     try {
-      const d = await getEventDetail(id);
+      const d = await getEventDetail(id, startMs, endMs);
       if (!mine()) return;
       // Right-click's whole point: the card never appears (#109). Through
       // this function rather than around it — the guard above, and the
@@ -1876,7 +1876,7 @@
   type FormRequest =
     | { mode: 'create'; anchor: Rect; initial: EventFormValue; chooseCalendar?: boolean }
     | {
-        mode: 'edit'; anchor: Rect; initial: EventFormValue; id: number; occurrenceStartMs: number;
+        mode: 'edit'; anchor: Rect; initial: EventFormValue; id: number; occurrenceStartMs: number; occurrenceEndMs: number;
         /** For the pending edit (part 2 spec §3): whether all-day switched on
          *  a series can be drawn, or waits for the save. */
         isRecurring: boolean;
@@ -2103,6 +2103,7 @@
       anchor: rect,
       id: occurrence.detail.id,
       occurrenceStartMs: occurrence.startMs,
+      occurrenceEndMs: occurrence.endMs,
       isRecurring: occurrence.detail.is_recurring,
       rowTimes: { start_ms: occurrence.detail.start_ms, end_ms: occurrence.detail.end_ms },
       initial: valueFromDetail(occurrence.detail, occurrence.startMs, occurrence.endMs),
@@ -2313,6 +2314,7 @@
           occurrenceStartMs: request.occurrenceStartMs,
           wasAllDay: request.initial.isAllDay,
           isRecurring: request.isRecurring,
+          isOutOfOffice: request.initial.isOutOfOffice,
           calendarId: request.initial.calendarId,
         }, result, calendars, ymdMs),
         {
@@ -2337,7 +2339,7 @@
           // moved, the store already holds the change (`storeHoldsShift`).
           write: () => keptIfLanded(async () => storeHoldsShift(request.rowTimes, await updateEvent(
             request.id, result.scope, request.occurrenceStartMs, result.fields, result.notify,
-            result.calendarId,
+            result.calendarId, request.occurrenceEndMs,
           ))),
           // Both ends of a move between calendars changed.
           ...refreshOf(() => [result.calendarId, request.initial.calendarId]),
@@ -2412,7 +2414,7 @@
     const hold = holdChange(moveChange(event, span, 'this'));
     let detail: EventDetail;
     try {
-      detail = await getEventDetail(event.id);
+      detail = await getEventDetail(event.id, event.start_ms, event.end_ms);
     } catch (e) {
       releaseHold(hold);
       error = String(e);
@@ -2435,6 +2437,9 @@
 
   /** The change a drop makes, for the overlay to draw. */
   function moveChange(event: UiEvent, span: { startMs: number; endMs: number }, scope: Scope): PendingChange {
+    if (event.is_out_of_office) {
+      return { kind: 'edit', id: event.id, occurrenceStartMs: event.start_ms, scope, when: null, patch: {}, detail: {} };
+    }
     return { kind: 'move', id: event.id, occurrenceStartMs: event.start_ms, scope, startMs: span.startMs, endMs: span.endMs };
   }
 
@@ -2458,7 +2463,7 @@
     let written = event.calendar_id;
     void commitChange(hold, moveChange(event, span, choice.scope), {
       write: () => keptIfLanded(async () => {
-        const detail = await getEventDetail(event.id);
+        const detail = await getEventDetail(event.id, event.start_ms, event.end_ms);
         written = detail.calendar_id;
         const value = valueFromDetail(detail, event.start_ms, event.end_ms);
         // The source instants are carried through untouched, and that is
@@ -2483,7 +2488,7 @@
           choice.scope,
           event.start_ms,
           toEventInput(moved, value, zoneName()),
-          choice.sendUpdates,
+          choice.sendUpdates, null, event.end_ms,
         ));
       }),
       ...refreshOf(() => [written]),
@@ -2930,7 +2935,7 @@
 {/if}
 
 {#if gridSelId !== null && gridSelStart !== null && gridAnchor && gridDetail}
-  {@const startMs = gridSelStart}
+  {@const startMs = gridDetail.occurrence_start_ms ?? gridSelStart}
   {@const rect = gridAnchor}
   <!-- Captured at this render, not read back off the module state inside the
        callbacks: `openEdit`/`askDelete` both call `closeGridEvent()` first, so
@@ -2938,7 +2943,7 @@
        `endMs` falls back to `startMs` only to satisfy the type — the `{#if}`
        above already proves a block is selected, and `gridSelEnd` is assigned
        and cleared in lockstep with `gridSelStart`. -->
-  {@const occurrence = { detail: gridDetail, startMs, endMs: gridSelEnd ?? startMs }}
+  {@const occurrence = { detail: gridDetail, startMs, endMs: gridDetail.occurrence_end_ms ?? gridSelEnd ?? startMs }}
   {#key gridDetail.id}
   <EventPopover
     detail={overlayDetail(gridDetail, pendingChanges(), startMs)}

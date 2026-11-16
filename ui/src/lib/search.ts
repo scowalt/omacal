@@ -16,6 +16,9 @@ export type Hit = {
    *  zone: what the result names and where a jump lands. `startMs` read in
    *  this webview's zone can be the day before. `null` when timed. */
   allDayDate: string | null;
+  allDay?: boolean;
+  startDate?: string | null;
+  endDate?: string | null;
 };
 
 /**

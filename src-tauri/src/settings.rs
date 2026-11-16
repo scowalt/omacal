@@ -2432,7 +2432,7 @@ mod tests {
     async fn the_views_leave_out_declined_meetings_until_asked_for_them() {
         let p = pool().await;
         let mut declined = omacal_store::StoredEvent {
-            id: 1, calendar_id: 1, google_id: "lunch".into(), summary: None, location: None,
+            id: 1, calendar_id: 1, google_id: "lunch".into(), google_event_type: None, summary: None, location: None,
             start_utc: 0, end_utc: 3_600_000, start_tz: "UTC".into(), end_tz: "UTC".into(),
             is_all_day: false, recurrence: None, recurring_event_id: None, original_start_utc: None,
             status: "confirmed".into(), self_response: Some("declined".into()), conference_uri: None,
