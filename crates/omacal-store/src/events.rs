@@ -5,6 +5,8 @@ pub struct StoredEvent {
     pub id: i64,
     pub calendar_id: i64,
     pub google_id: String,
+    /// Google identity only; native date-only timing stays in `is_all_day`.
+    pub google_event_type: Option<String>,
     pub summary: Option<String>,
     pub location: Option<String>,
     pub start_utc: i64,
@@ -78,6 +80,21 @@ pub struct StoredEvent {
     pub calendar_default_reminders: Vec<Reminder>,
 }
 
+impl StoredEvent {
+    pub fn is_out_of_office(&self) -> bool {
+        self.google_event_type.as_deref() == Some("outOfOffice")
+    }
+
+    /// Display-only projection of this occurrence. Writers and recurrence
+    /// continue reading the native `is_all_day` field.
+    pub fn presentation(&self, interval: omacal_core::Interval) -> omacal_core::presentation::Presentation {
+        omacal_core::presentation::presentation(
+            self.is_all_day, self.google_event_type.as_deref(), interval,
+            &self.start_tz, &self.calendar_timezone,
+        )
+    }
+}
+
 /// One reminder: fire `minutes` before the event starts, by `method`.
 ///
 /// `method` is Google's own vocabulary — `popup` or `email`. Both are stored;
@@ -123,7 +140,7 @@ pub struct Attendee {
     pub additional_guests: i64,
 }
 
-const SELECT_COLS: &str = "e.id, e.calendar_id, e.google_id, e.summary, e.location,
+const SELECT_COLS: &str = "e.id, e.calendar_id, e.google_id, e.google_event_type, e.summary, e.location,
      e.start_utc, e.end_utc, e.start_tz, e.end_tz, e.is_all_day, e.recurrence,
      e.recurring_event_id, e.original_start_utc,
      e.status, e.self_response, e.conference_uri,
@@ -137,6 +154,7 @@ fn row_to_event(row: &sqlx::sqlite::SqliteRow) -> StoredEvent {
         id: row.get("id"),
         calendar_id: row.get("calendar_id"),
         google_id: row.get("google_id"),
+        google_event_type: row.get("google_event_type"),
         summary: row.get("summary"),
         location: row.get("location"),
         start_utc: row.get("start_utc"),
@@ -197,7 +215,7 @@ pub async fn upsert_event<'e, E>(exec: E, ev: &StoredEvent) -> anyhow::Result<i6
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
-    // 25 columns, 25 placeholders, 25 binds, all in the same order. Keep them
+    // 26 columns, 26 placeholders, 26 binds, all in the same order. Keep them
     // that way: a mismatch here writes a value into the wrong column silently.
     let attendees_json = serde_json::to_string(&ev.attendees)?;
     let reminders_json = serde_json::to_string(&ev.reminders)?;
@@ -206,8 +224,8 @@ where
              start_tz, end_tz, is_all_day, recurrence, recurring_event_id,
              original_start_utc, status, self_response, conference_uri, updated_at,
              description, etag, sequence, organizer_email, attendees_json, reminders_json,
-             guests_can_modify, transparency, visibility)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)
+             guests_can_modify, transparency, visibility, google_event_type)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)
          ON CONFLICT (calendar_id, google_id) DO UPDATE SET
              summary = excluded.summary, location = excluded.location,
              start_utc = excluded.start_utc, end_utc = excluded.end_utc,
@@ -223,7 +241,8 @@ where
              reminders_json = excluded.reminders_json,
              guests_can_modify = excluded.guests_can_modify,
              transparency = excluded.transparency,
-             visibility = excluded.visibility
+             visibility = excluded.visibility,
+             google_event_type = excluded.google_event_type
          RETURNING id",
     )
     .bind(ev.calendar_id)          // ?1  calendar_id
@@ -251,6 +270,7 @@ where
     .bind(ev.guests_can_modify as i64) // ?23 guests_can_modify
     .bind(&ev.transparency)        // ?24 transparency
     .bind(&ev.visibility)          // ?25 visibility
+    .bind(&ev.google_event_type)   // ?26 google_event_type
     .fetch_one(exec)
     .await?
     .get("id");
@@ -757,7 +777,7 @@ mod tests {
 
     fn ev(cal: i64, gid: &str, start: i64, end: i64) -> StoredEvent {
         StoredEvent {
-            id: 0, calendar_id: cal, google_id: gid.into(),
+            id: 0, calendar_id: cal, google_id: gid.into(), google_event_type: None,
             summary: Some("Standup".into()), location: None,
             start_utc: start, end_utc: end,
             start_tz: "Europe/Sofia".into(), end_tz: "Europe/Sofia".into(),
@@ -1155,7 +1175,7 @@ mod tests {
         let pool = connect_memory().await.unwrap();
         let cal = seed(&pool).await;
         let full = StoredEvent {
-            id: 0, calendar_id: cal, google_id: "gid".into(),
+            id: 0, calendar_id: cal, google_id: "gid".into(), google_event_type: None,
             summary: Some("Summary".into()), location: Some("Room 1".into()),
             start_utc: 1_000, end_utc: 2_000,
             start_tz: "Asia/Kolkata".into(), end_tz: "Europe/Sofia".into(),
@@ -1412,6 +1432,7 @@ mod tests {
             id: 0,
             calendar_id: cal,
             google_id: "ev1".into(),
+            google_event_type: None,
             summary: Some("Weekly Standup".into()),
             location: None,
             start_utc: 1786341600000,
@@ -1735,6 +1756,74 @@ mod tests {
         let kept: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE id = ?1")
             .bind(id).fetch_one(&pool).await.unwrap();
         assert_eq!(kept, 1, "cached events must remain available until the refetch succeeds");
+    }
+
+    #[tokio::test]
+    async fn google_type_migration_keeps_legacy_events_unknown_and_cursors_intact() {
+        let upstream = sqlx::migrate!("./migrations")
+            .iter()
+            .filter(|m| m.version < crate::GOOGLE_EVENT_TYPE_MIGRATION)
+            .count();
+        assert!(upstream >= 19, "upstream's 0019 must land before the fork's migration");
+        let pool = pool_migrated_below(crate::GOOGLE_EVENT_TYPE_MIGRATION, upstream).await;
+        let cal = seed(&pool).await;
+        sqlx::query("INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end)
+                     VALUES (?1, 'keep-me', 0, 9999999999999)")
+            .bind(cal).execute(&pool).await.unwrap();
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO events (calendar_id, google_id, summary, start_utc, end_utc,
+                 start_tz, end_tz, is_all_day, status, updated_at)
+             VALUES (?1, 'legacy-ooo', 'OOO (🍂)', 1792123200000, 1792555200000,
+                     'America/New_York', 'America/New_York', 0, 'confirmed', 0)
+             RETURNING id",
+        ).bind(cal).fetch_one(&pool).await.unwrap();
+        apply_migration(&pool, crate::GOOGLE_EVENT_TYPE_MIGRATION).await;
+        let (row, _, _) = event_by_id(&pool, id).await.unwrap().unwrap();
+        assert!(row.google_event_type.is_none(), "a title is not provider metadata");
+        assert!(!row.is_all_day);
+        assert_eq!((row.start_utc, row.end_utc), (1792123200000, 1792555200000));
+        let cursor: String = sqlx::query_scalar("SELECT sync_token FROM sync_state WHERE calendar_id = ?1")
+            .bind(cal).fetch_one(&pool).await.unwrap();
+        assert_eq!(cursor, "keep-me", "this migration must not force a resync");
+    }
+
+    /// Fork builds published before upstream's 0019 recorded
+    /// `google_event_type` as version 19. Opening such a database must keep
+    /// its column, apply upstream's 0019, and leave every version recorded
+    /// once, instead of failing with `VersionMismatch(19)`.
+    #[tokio::test]
+    async fn a_database_that_numbered_google_event_type_19_still_opens() {
+        use sqlx::migrate::{Migration, Migrator};
+
+        let pool = pool_migrated_below(1, 0).await;
+        let all = sqlx::migrate!("./migrations");
+        let mut old: Vec<Migration> = all.iter().filter(|m| m.version < 19).cloned().collect();
+        let mut google_event_type = all
+            .iter()
+            .find(|m| m.version == crate::GOOGLE_EVENT_TYPE_MIGRATION)
+            .unwrap()
+            .clone();
+        google_event_type.version = 19;
+        old.push(google_event_type);
+        Migrator::new(Subset(old)).await.unwrap().run(&pool).await.unwrap();
+        let cal = seed(&pool).await;
+        sqlx::query("INSERT INTO events (calendar_id, google_id, start_utc, end_utc, start_tz, end_tz,
+                         updated_at, google_event_type)
+                     VALUES (?1, 'ooo', 0, 60000, 'UTC', 'UTC', 0, 'outOfOffice')")
+            .bind(cal).execute(&pool).await.unwrap();
+
+        crate::migrate(&pool).await.unwrap();
+
+        let (kind, transparency): (Option<String>, String) =
+            sqlx::query_as("SELECT google_event_type, transparency FROM events WHERE google_id = 'ooo'")
+                .fetch_one(&pool).await.unwrap();
+        assert_eq!(kind.as_deref(), Some("outOfOffice"));
+        assert_eq!(transparency, "opaque");
+        let mut expected: Vec<i64> = all.iter().map(|m| m.version).collect();
+        expected.sort_unstable();
+        let recorded: Vec<i64> = sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(recorded, expected);
     }
 
     /// 0003's backfill: an event stored before it landed is missing the guest

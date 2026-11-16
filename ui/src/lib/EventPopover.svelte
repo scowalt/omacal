@@ -144,6 +144,9 @@
    *
    * A multi-day event names both ends (`whenLine`). Its last day moves with
    * its first: `end_date` is shifted by the same whole days as `start_date`.
+   * Whole-day OOO is all-day here too, on its Rust-projected inclusive range.
+   * Contextual dates (`occurrence_start_ms` set) are already the clicked
+   * interval's dates and must not receive a second JS shift.
    *
    * One consequence worth stating, since `detail` is a live prop and these two
    * are not: the after-paint `refresh_event` no longer moves this line. It
@@ -152,12 +155,19 @@
    * was not on — and a genuine time change reaches the screen the way every
    * other one does, when the grid reloads.
    */
+  const shownStartMs = $derived(detail.occurrence_start_ms ?? occurrenceStartMs);
+  const shownEndMs = $derived(detail.occurrence_end_ms ?? occurrenceEndMs);
+  const contextual = $derived(detail.occurrence_start_ms != null && detail.start_date != null);
   const firstDate = $derived(
-    detail.is_all_day ? occurrenceDate(detail.start_date, detail.start_ms, occurrenceStartMs) : null,
+    detail.is_all_day
+      ? contextual ? detail.start_date : occurrenceDate(detail.start_date, detail.start_ms, shownStartMs)
+      : null,
   );
   const lastDate = $derived(
     detail.is_all_day
-      ? occurrenceDate(detail.end_date ?? detail.start_date, detail.start_ms, occurrenceStartMs)
+      ? contextual
+        ? detail.end_date ?? detail.start_date
+        : occurrenceDate(detail.end_date ?? detail.start_date, detail.start_ms, shownStartMs)
       : null,
   );
   /**
@@ -176,14 +186,14 @@
       const year = firstDate.slice(0, 4) !== lastDate.slice(0, 4);
       return `${dayOfDate(firstDate, year)} – ${dayOfDate(lastDate, year)} · ${n} days`;
     }
-    const start = new Date(occurrenceStartMs);
-    const last = new Date(occurrenceEndMs - 1);
-    if (occurrenceEndMs - occurrenceStartMs > 0 && start.toDateString() !== last.toDateString()) {
+    const start = new Date(shownStartMs);
+    const last = new Date(shownEndMs - 1);
+    if (shownEndMs - shownStartMs > 0 && start.toDateString() !== last.toDateString()) {
       const year = start.getFullYear() !== last.getFullYear();
-      return `${dayOfInstant(occurrenceStartMs, year)} ${hhmm(occurrenceStartMs)} – `
-        + `${dayOfInstant(occurrenceEndMs, year)} ${hhmm(occurrenceEndMs)}`;
+      return `${dayOfInstant(shownStartMs, year)} ${hhmm(shownStartMs)} – `
+        + `${dayOfInstant(shownEndMs, year)} ${hhmm(shownEndMs)}`;
     }
-    return `${dayOfInstant(occurrenceStartMs)} · ${hhmm(occurrenceStartMs)}–${hhmm(occurrenceEndMs)}`;
+    return `${dayOfInstant(shownStartMs)} · ${hhmm(shownStartMs)}–${hhmm(shownEndMs)}`;
   });
 
   // A neutral default so `.pop` renders (and so `offsetWidth`/`offsetHeight`

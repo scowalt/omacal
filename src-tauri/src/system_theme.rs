@@ -68,7 +68,6 @@ pub fn init(app: &AppHandle) {
         if let Some(t) = app.get_webview_window("main").and_then(|w| w.theme().ok()) {
             theme::set_system_scheme(from_window_theme(t));
         }
-        return;
     }
     follow_portal(app);
 }
