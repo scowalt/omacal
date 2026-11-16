@@ -20,6 +20,8 @@ pub struct InviteCandidate {
     pub summary: Option<String>,
     pub start_utc: i64,
     pub is_all_day: bool,
+    pub google_event_type: Option<String>,
+    pub event_timezone: String,
     pub organizer_email: Option<String>,
     /// The owning calendar's zone — what an all-day date resolves against.
     pub calendar_timezone: String,
@@ -39,6 +41,13 @@ pub struct InviteCandidate {
     pub end_utc: i64,
 }
 
+impl InviteCandidate {
+    pub fn presentation(&self) -> omacal_core::presentation::Presentation {
+        omacal_core::presentation::presentation(self.is_all_day, self.google_event_type.as_deref(),
+            omacal_core::Interval { start_ms: self.start_utc, end_ms: self.end_utc }, &self.event_timezone, &self.calendar_timezone)
+    }
+}
+
 /// The query both readers below share; `extra_clause` is the one line they
 /// differ by. "Invitation" means: the user's own attendee row says
 /// `needsAction`, on a non-cancelled master row (an exception inherits its
@@ -53,7 +62,7 @@ async fn invites_where(
 ) -> anyhow::Result<Vec<InviteCandidate>> {
     let sql = format!(
         "SELECT e.id, e.calendar_id, e.summary, e.start_utc, e.end_utc, e.is_all_day,
-                e.organizer_email, e.attendees_json,
+                e.organizer_email, e.attendees_json, e.google_event_type, e.start_tz,
                 c.timezone, c.selected, c.access_role, a.provider,
                 COALESCE(c.color_override, c.color_hex) AS color_hex
            FROM events e
@@ -86,6 +95,8 @@ async fn invites_where(
             start_utc: row.get("start_utc"),
             end_utc: row.get("end_utc"),
             is_all_day: row.get::<i64, _>("is_all_day") != 0,
+            google_event_type: row.get("google_event_type"),
+            event_timezone: row.get("start_tz"),
             organizer_email: row.get("organizer_email"),
             calendar_timezone: row.get("timezone"),
             calendar_selected: row.get::<i64, _>("selected") != 0,
@@ -205,6 +216,7 @@ mod tests {
             id: 0,
             calendar_id: 1,
             google_id: gid.into(),
+            google_event_type: None,
             summary: Some("Planning".into()),
             location: None,
             start_utc: start,

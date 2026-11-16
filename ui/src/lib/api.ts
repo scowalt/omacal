@@ -13,6 +13,10 @@ export type UiEvent = {
   start_ms: number; end_ms: number; color: string;
   response: 'accepted' | 'needsAction' | 'tentative' | 'declined';
   is_all_day: boolean;
+  /** Rust-projected civil dates; last date inclusive, independent of viewer zone. */
+  all_day_dates?: readonly string[];
+  /** Source identity for deferred timing, not an inferred classification. */
+  is_out_of_office?: boolean;
   /** Invitees, the organizer included; `0` is a solo event, not unknown. */
   attendees: number;
   /** One instance of something that repeats — the series' own expansion or

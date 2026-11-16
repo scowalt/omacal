@@ -106,6 +106,7 @@ pub fn caldav_to_stored(
         id: 0,
         calendar_id,
         google_id,
+        google_event_type: None,
         summary: ev.summary.clone(),
         location: ev.location.clone(),
         start_utc,

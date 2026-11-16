@@ -121,6 +121,7 @@ async fn scheduled_events(
                 occurrence_start_ms: iv.start_ms,
                 occurrence_end_ms: iv.end_ms,
                 is_all_day: src.is_all_day,
+                presentation_all_day: src.presentation(iv).is_all_day(),
                 use_default_reminders: src.reminders.use_default,
                 overrides: src.reminders.overrides.iter().map(to_core).collect(),
                 calendar_defaults: src.calendar_default_reminders.iter().map(to_core).collect(),
@@ -460,11 +461,30 @@ mod tests {
         omacal_store::Reminder { method: "popup".into(), minutes }
     }
 
+    #[tokio::test]
+    async fn ooo_reminders_keep_timed_firing_but_say_all_day() {
+        let pool = seeded("Pacific/Auckland", "[]").await;
+        let mut ooo = event("ooo", 1792123200000, 1792555200000, Reminders {
+            use_default: false, overrides: vec![omacal_store::Reminder { method: "popup".into(), minutes: 10 }],
+        });
+        ooo.google_event_type = Some("outOfOffice".into());
+        ooo.start_tz = "America/New_York".into();
+        omacal_store::upsert_event(&pool, &ooo).await.unwrap();
+        let events = scheduled_events(&pool, 1792122600000, HOUR).await.unwrap();
+        assert!(!events[0].is_all_day, "scheduler input stays native");
+        let due = due_reminders(&events, &Default::default(), 1792122600000, HOUR, &[]);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].fire_at_ms, 1792122600000);
+        assert_eq!(due[0].key.occurrence_ms, 1792123200000);
+        assert_eq!(crate::notify::notification_for_format(&due[0], "UTC", crate::settings::TimeFormat::H24).body, "All day");
+    }
+
     fn event(google_id: &str, start: i64, end: i64, reminders: Reminders) -> StoredEvent {
         StoredEvent {
             id: 0,
             calendar_id: 1,
             google_id: google_id.into(),
+            google_event_type: None,
             summary: Some("Standup".into()),
             location: None,
             start_utc: start,

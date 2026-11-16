@@ -153,8 +153,45 @@ pub async fn connect(url: &str) -> anyhow::Result<SqlitePool> {
     // born tight, and the explicit sweep below catches whatever an earlier
     // release already left at the umask default.
     harden_permissions(url);
-    sqlx::migrate!("./migrations").run(&pool).await?;
+    migrate(&pool).await?;
     Ok(pool)
+}
+
+/// This fork's own migrations start at 9001, far above upstream's sequence,
+/// so a migration upstream adds later never takes a number a fork migration
+/// already holds.
+pub(crate) const GOOGLE_EVENT_TYPE_MIGRATION: i64 = 9001;
+
+/// Fork builds published before upstream's own 0019 (Show as and Visibility)
+/// shipped `google_event_type` as migration 19. Their databases record that
+/// migration under version 19, which upstream's 0019 now claims.
+const GOOGLE_EVENT_TYPE_WAS: i64 = 19;
+
+/// Runs every migration, after moving a fork build's `google_event_type`
+/// record from version 19 to its own number. The SQL is unchanged, so the
+/// checksum matches; sqlx then applies upstream's 0019 as a pending
+/// migration instead of refusing to open the database with `VersionMismatch`.
+pub(crate) async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
+    let migrator = sqlx::migrate!("./migrations");
+    let has_history: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations')",
+    )
+    .fetch_one(pool)
+    .await?;
+    if has_history {
+        let fork = migrator
+            .iter()
+            .find(|m| m.version == GOOGLE_EVENT_TYPE_MIGRATION)
+            .ok_or_else(|| anyhow::anyhow!("migration {GOOGLE_EVENT_TYPE_MIGRATION} is missing"))?;
+        sqlx::query("UPDATE _sqlx_migrations SET version = ?1 WHERE version = ?2 AND checksum = ?3")
+            .bind(GOOGLE_EVENT_TYPE_MIGRATION)
+            .bind(GOOGLE_EVENT_TYPE_WAS)
+            .bind(&*fork.checksum)
+            .execute(pool)
+            .await?;
+    }
+    migrator.run(pool).await?;
+    Ok(())
 }
 
 /// Owner-only permissions on the database and both its sidecars — all three
@@ -195,7 +232,7 @@ fn db_file_of(url: &str) -> Option<&str> {
 pub async fn connect_memory() -> anyhow::Result<SqlitePool> {
     let opts = SqliteConnectOptions::from_str("sqlite::memory:")?.foreign_keys(true);
     let pool = pool_with_fold().max_connections(1).connect_with(opts).await?;
-    sqlx::migrate!("./migrations").run(&pool).await?;
+    migrate(&pool).await?;
     Ok(pool)
 }
 
