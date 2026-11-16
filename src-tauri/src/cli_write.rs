@@ -524,6 +524,11 @@ pub(crate) fn update_when(
     occ_end: i64,
     tz: &jiff::tz::TimeZone,
 ) -> Result<(i64, i64), String> {
+    // Descriptive edits preserve exact native instants (and repeated-hour
+    // identity), rather than rebuilding a multi-day event on its first day.
+    if date.is_none() && start.is_none() && end.is_none() {
+        return Ok((occ_start, occ_end));
+    }
     let stamp = |ms: i64| -> Result<(String, String), String> {
         let z = jiff::Timestamp::from_millisecond(ms).map_err(|e| e.to_string())?.to_zoned(tz.clone());
         Ok((z.date().to_string(), z.strftime("%H:%M").to_string()))
@@ -537,7 +542,10 @@ pub(crate) fn update_when(
     let new_date = date.unwrap_or(&cur_date);
     let shift = day(new_date)? - day(&cur_date)?;
     let end_date = day(&cur_end_date)?.checked_add(shift).map_err(|e| e.to_string())?.to_string();
-    timed_when(new_date, start.unwrap_or(&cur_start), end.unwrap_or(&cur_end), Some(&end_date), tz)
+    let (s, e) = timed_when(new_date, start.unwrap_or(&cur_start), end.unwrap_or(&cur_end), Some(&end_date), tz)?;
+    // An endpoint no flag touched keeps its native instant.
+    Ok((if date.is_none() && start.is_none() { occ_start } else { s },
+        if date.is_none() && end.is_none() { occ_end } else { e }))
 }
 
 pub(crate) fn timed_when(
@@ -1349,6 +1357,23 @@ mod tests {
                 "{provider} does not mail"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn an_ooo_cli_title_update_keeps_the_full_native_timed_interval() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        sqlx::query("INSERT INTO accounts (google_sub, email, created_at) VALUES ('ooo', 'me@x.test', 0)").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO calendars (account_id, google_id, summary, timezone, access_role) VALUES (1, 'me@x.test', 'Work', 'America/New_York', 'owner')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO events (calendar_id, google_id, google_event_type, summary, start_utc, end_utc, start_tz, end_tz, is_all_day, status, updated_at)
+                     VALUES (1, 'ooo', 'outOfOffice', 'OOO (🍂)', 1792123200000, 1792555200000, 'America/New_York', 'America/New_York', 0, 'confirmed', 0)").execute(&pool).await.unwrap();
+        let native = target(&pool, 1).await.unwrap();
+        assert!(!native.all_day, "presentation must not trigger the date-only CLI refusal");
+        let WriteCmd::Update(args) = parse("update", "1 --occurrence 1792123200000 --title Renamed").unwrap() else { panic!("update") };
+        let (start, end) = update_when(args.date.as_deref(), args.start.as_deref(), args.end.as_deref(), args.occurrence, args.occurrence + native.end_ms - native.start_ms, &jiff::tz::TimeZone::UTC).unwrap();
+        assert_eq!((start, end), (1792123200000, 1792555200000));
+        let WriteCmd::Update(timed) = parse("update", "1 --occurrence 1792123200000 --start 05:00").unwrap() else { panic!("update") };
+        assert_eq!(update_when(timed.date.as_deref(), timed.start.as_deref(), timed.end.as_deref(), native.start_ms, native.end_ms, &jiff::tz::TimeZone::UTC).unwrap(),
+            (1792126800000, 1792555200000), "changing one clock keeps the native end's date");
     }
 
     /// §4's notify rule: guests demand an answer, solitude implies none.
