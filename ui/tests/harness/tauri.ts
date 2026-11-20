@@ -713,6 +713,7 @@ type StubSettings = {
   listMode: boolean;
   combineIdenticalEvents: boolean;
   calendarGroups: { name: string; calendarIds: number[] }[];
+  hiddenEventTitles: string[];
   showDate: boolean;
   menubarDayView?: boolean;
   menubarLabel?: boolean;
@@ -808,6 +809,7 @@ const DEFAULT_SETTINGS: StubSettings = {
   listMode: false,
   combineIdenticalEvents: false,
   calendarGroups: [],
+  hiddenEventTitles: [],
   // The mark, which is what the tray has always worn.
   showDate: false,
   // The grid's own 70, so every column golden holds.
