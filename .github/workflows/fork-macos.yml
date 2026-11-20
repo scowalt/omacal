@@ -14,10 +14,14 @@
 # How this differs from upstream's release.yml. The differences are applied
 # at build time — a --config overlay and two compile-time variables — so no
 # source file diverges from upstream for them:
-#   - ad-hoc signed ("-"), not Developer ID: the fork has no Apple
-#     certificate. Downloads made with curl or gh carry no quarantine flag,
-#     so Gatekeeper never sees them; a browser download needs "Open Anyway"
-#     in System Settings > Privacy & Security.
+#   - signed with the fork owner's Developer ID certificate, but not
+#     notarized. The Team ID in that signature is what keeps the Keychain's
+#     "Always Allow" across updates: an ad-hoc or self-signed build is
+#     trusted by its exact hash, so every update asked for the login
+#     password once per saved account. Downloads made with curl or gh carry
+#     no quarantine flag, so Gatekeeper never asks for notarization; a
+#     browser download needs "Open Anyway" in System Settings > Privacy &
+#     Security.
 #   - updates come from this fork. The updater endpoint and pubkey in the
 #     overlay are the fork's, and the update notice's endpoint is set by
 #     OMACAL_LATEST_RELEASE_ENDPOINT (src-tauri/src/update.rs). The
@@ -113,8 +117,7 @@ jobs:
             "version": "$VERSION",
             "bundle": {
               "targets": ["app"],
-              "createUpdaterArtifacts": true,
-              "macOS": { "signingIdentity": "-" }
+              "createUpdaterArtifacts": true
             },
             "plugins": {
               "updater": {
@@ -126,10 +129,29 @@ jobs:
           EOF
           cat "$RUNNER_TEMP/fork.conf.json"
 
+      # Without these the bundler would quietly build unsigned, and that build
+      # would bring the Keychain prompts back.
+      - name: Require the Developer ID secrets
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY; do
+            [ -n "${!name}" ] || { echo "the $name secret is not set" >&2; exit 1; }
+          done
+          case "$APPLE_SIGNING_IDENTITY" in
+            "Developer ID Application: "*) ;;
+            *) echo "APPLE_SIGNING_IDENTITY is not a Developer ID Application identity" >&2; exit 1 ;;
+          esac
+
       # The CLI ui/package-lock.json pins, for release.yml's reason: a new
       # bundler is a change made through the lockfile, not one a run picks up.
       - name: Build the app
         env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           OMACAL_CLIENT_ID: ${{ secrets.OMACAL_CLIENT_ID }}
           OMACAL_CLIENT_SECRET: ${{ secrets.OMACAL_CLIENT_SECRET }}
           OMACAL_LATEST_RELEASE_ENDPOINT: https://api.github.com/repos/${{ github.repository }}/releases/latest
@@ -147,7 +169,15 @@ jobs:
           lipo -archs "$bin"
           lipo -archs "$bin" | grep -qx arm64
           codesign --verify --deep --strict --verbose=2 "$app"
-          codesign -dv "$app" 2>&1 | grep -q '^Signature=adhoc$'
+          team=$(codesign -dv "$app" 2>&1 | sed -n 's/^TeamIdentifier=//p')
+          case "$team" in
+            "" | "not set") echo "the app carries no Team ID" >&2; exit 1 ;;
+          esac
+          codesign -dv "$app" 2>&1 | grep -q '^Authority=Developer ID Application: ' || {
+            echo "the app is not signed with a Developer ID Application certificate" >&2
+            exit 1
+          }
+          echo "TeamIdentifier: $team"
           shown=$(plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")
           [ "$shown" = "$VERSION" ] || { echo "the app says $shown, not $VERSION" >&2; exit 1; }
           grep -q "$VERSION" "$bin" || { echo "$VERSION is not compiled in" >&2; exit 1; }
@@ -218,15 +248,13 @@ jobs:
 
           Installed builds update themselves from this repository: the app shows a banner when a newer one is out, and its Update button installs it.
 
-          First install (curl leaves no quarantine flag, so Gatekeeper does not block the ad-hoc signature):
+          First install (curl leaves no quarantine flag, so Gatekeeper does not ask for notarization):
 
           \`\`\`sh
           curl -fL -o /tmp/omacal.zip $url
           pgrep -x omacal >/dev/null && osascript -e 'quit app "OmaCal"'; rm -rf /Applications/OmaCal.app
           ditto -x -k /tmp/omacal.zip /Applications && open /Applications/OmaCal.app
           \`\`\`
-
-          Each build has a new ad-hoc signature, so after an update macOS may ask whether OmaCal can use its saved Google sign-in in the Keychain. Choose **Always Allow**.
           EOF
           tag="v$VERSION"
           gh release create "$tag" dist/* \
