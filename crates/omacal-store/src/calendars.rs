@@ -1000,9 +1000,11 @@ pub async fn delete_account(pool: &SqlitePool, account_id: i64) -> anyhow::Resul
 /// `delete_account`'s sweep, for one calendar instead of all of an account's.
 /// Returns how many calendar rows went (0 or 1).
 ///
-/// For a CalDAV collection that is gone from the server, and only that: the
+/// For a calendar that is gone from the server, and only that. A CalDAV
 /// caller (`omacal_sync::caldav::refresh_collections`) has already heard the
-/// collection itself answer 404 or 410. A calendar the *user* removes keeps its row
+/// collection itself answer 404 or 410; a Google caller
+/// (`reconcile_calendar_list` in the app crate) has a complete, successful
+/// calendar list that no longer names it. A calendar the *user* removes keeps its row
 /// with `sync_enabled = 0` instead (`set_sync_enabled`), so that the next
 /// sign-in cannot bring it back; a collection the server deleted is not
 /// coming back, and a row left for it would be a calendar nothing can sync or

@@ -666,7 +666,10 @@ async fn sign_in_impl(pool: &SqlitePool, demo: bool, cancelled: std::sync::Arc<s
         .fetch_one(pool)
         .await?;
 
-        for c in &calendars {
+        // Hidden entries stay out, as they did before `list_calendars`
+        // returned them: hiding one in Google's sidebar says the user does not
+        // want it shown.
+        for c in calendars.iter().filter(|c| !c.hidden) {
             upsert_calendar(pool, account_id, c).await?;
         }
 
@@ -857,6 +860,11 @@ pub(crate) async fn calendars_to_sync(
 /// unshared behind our back answers 403 or 404 forever — neither is a reason to
 /// stop syncing anything else.
 ///
+/// A calendar Google has deleted is not a failure at all: it is deleted, or
+/// taken out of sync, so it is neither retried nor counted. See
+/// [`reconcile_calendar_list`] and [`calendar_is_gone`] for what counts as
+/// proof that it is gone.
+///
 /// Returns the rows written, a label per failed account or calendar, and the
 /// accounts whose refresh token is dead for good. The labels are for the log;
 /// the caller turns their *count* into the user-facing failure, because an
@@ -904,11 +912,14 @@ where
         };
 
         let client = omacal_google::CalendarClient::new(api_base, &access_token);
-        // Names can change without reconnecting an account. Update only known
-        // calendars: this must not import or re-enable calendars during sync.
-        if let Err(e) = refresh_calendar_names(pool, *account_id, &client).await {
-            tracing::warn!(%e, "could not refresh calendar names; keeping cached names");
-        }
+        let listed = match reconcile_calendar_list(pool, *account_id, &client).await {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(account = %email, %e,
+                    "could not refresh the calendar list; keeping cached calendars");
+                false
+            }
+        };
 
         let cals = match calendars_to_sync(pool, *account_id).await {
             Ok(c) => c,
@@ -926,6 +937,15 @@ where
             .await
             {
                 Ok(out) => total += (out.upserted + out.deleted) as u64,
+                Err(e) if calendar_is_gone(&e, listed) => {
+                    tracing::warn!(account = %email, calendar = %google_id,
+                        "Google no longer has this calendar; it stops syncing");
+                    if let Err(e) = omacal_store::set_sync_enabled(pool, cal_id, false).await {
+                        tracing::warn!(account = %email, calendar = %google_id, %e,
+                            "could not take the missing calendar out of sync");
+                        failed.push(format!("{email} / {google_id}"));
+                    }
+                }
                 Err(e) => {
                     tracing::warn!(account = %email, calendar = %google_id, %e, "calendar sync failed");
                     failed.push(format!("{email} / {google_id}"));
@@ -937,10 +957,52 @@ where
     (total, failed, dead)
 }
 
-async fn refresh_calendar_names(
+/// Whether a calendar's sync failed because Google no longer has the
+/// calendar, rather than for a reason that can pass.
+///
+/// Only a 404 from the calendar's own events endpoint counts, and only when
+/// the account's calendar list answered properly on the same pass: that
+/// answer shows the token works and the replies come from Google. A 404 with
+/// no such proof could be a proxy or captive portal answering every request,
+/// and would take every calendar out of sync. 401s, other statuses and
+/// transport errors, routine around sleep and wake, never count.
+///
+/// The calendar is kept but no longer synced, the state "Remove" leaves: the
+/// list still names it, so it is the user's to add back if Google ever
+/// serves it again.
+fn calendar_is_gone(e: &anyhow::Error, listed: bool) -> bool {
+    listed
+        && matches!(
+            e.downcast_ref::<omacal_google::ApiError>(),
+            Some(omacal_google::ApiError::CalendarNotFound)
+        )
+}
+
+/// Brings one account's stored calendars in line with its Google calendar
+/// list: names refresh, and a calendar the list no longer has is deleted.
+///
+/// Names can change without reconnecting an account. Update only known
+/// calendars: this must not import or re-enable calendars during sync.
+///
+/// A calendar the list leaves out is deleted, not just taken out of sync.
+/// Google lists every calendar on the account, hidden ones included (see
+/// `list_calendars`), so one it leaves out was deleted or unsubscribed, and a
+/// row kept for it would be offered in settings as a calendar to add back.
+///
+/// An error changes nothing, and the caller keeps the cached calendars. That
+/// includes a list without the account's primary calendar: Google always
+/// lists it, and `{}` parses as an empty list, so such a reply came from
+/// something other than Google and deleting by it would delete everything.
+async fn reconcile_calendar_list(
     pool: &SqlitePool, account_id: i64, client: &omacal_google::CalendarClient,
 ) -> anyhow::Result<()> {
     let calendars = client.list_calendars().await?;
+    anyhow::ensure!(
+        calendars.iter().any(|c| c.primary),
+        "the calendar list has no primary calendar, so it is not trusted"
+    );
+    let listed: std::collections::HashSet<String> =
+        calendars.iter().map(|c| c.id.clone()).collect();
     let mut names = Vec::new();
     for c in calendars {
         let mut name = c.display_name().to_string();
@@ -958,6 +1020,17 @@ async fn refresh_calendar_names(
             .execute(&mut *tx).await?;
     }
     tx.commit().await?;
+
+    let stored: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id, google_id FROM calendars WHERE account_id = ?1 ORDER BY id")
+            .bind(account_id)
+            .fetch_all(pool)
+            .await?;
+    for (id, google_id) in stored.into_iter().filter(|(_, g)| !listed.contains(g)) {
+        tracing::warn!(calendar = %google_id,
+            "calendar is no longer on the account's Google calendar list; removing it");
+        omacal_store::delete_calendar(pool, id).await?;
+    }
     Ok(())
 }
 
@@ -2816,7 +2889,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET")).and(path("/users/me/calendarList"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"items":[
-                {"id":"owner@x", "summary":"owner@x", "summaryOverride":"Studio"},
+                {"id":"owner@x", "summary":"owner@x", "summaryOverride":"Studio", "primary":true},
                 {"id":"unknown", "summary":"Do not import"}
             ]}))).mount(&server).await;
         sync_accounts(&pool, &[(account, "owner@x".into())], &server.uri(), 0, 1,
@@ -2849,7 +2922,7 @@ mod tests {
         Mock::given(method("GET")).and(path("/calendars/owner%40x"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"summary":"Jon Kinney"})))
             .expect(1).mount(&server).await;
-        refresh_calendar_names(&pool, account, &omacal_google::CalendarClient::new(server.uri(), "test")).await.unwrap();
+        reconcile_calendar_list(&pool, account, &omacal_google::CalendarClient::new(server.uri(), "test")).await.unwrap();
         assert_eq!(omacal_store::list_calendars(&pool).await.unwrap()[0].summary, "Jon Kinney");
     }
 
@@ -2862,8 +2935,157 @@ mod tests {
             time_zone: Some("Europe/Sofia".into()),
             access_role: "owner".into(),
             primary: true,
+            hidden: false,
             default_reminders: Vec::new(),
         }
+    }
+
+    /// A calendar list as Google answers it: the account's primary calendar
+    /// plus `others`.
+    fn calendar_list(others: &[&str]) -> serde_json::Value {
+        let mut items = vec![serde_json::json!({"id": "me@x", "summary": "Me", "primary": true})];
+        items.extend(others.iter().map(|id| serde_json::json!({"id": id, "summary": "Cal"})));
+        serde_json::json!({ "items": items })
+    }
+
+    async fn sync_state_of(pool: &SqlitePool) -> Vec<(String, i64)> {
+        sqlx::query_as("SELECT google_id, sync_enabled FROM calendars ORDER BY id")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    /// The 2026-11 incident: a calendar deleted on Google answered 404 on
+    /// every tick, and each tick reported the whole sync as failed. A 404,
+    /// with the calendar list answering properly beside it, takes the
+    /// calendar out of sync and is not a failure; the next tick does not ask
+    /// for it again.
+    #[tokio::test]
+    async fn a_calendar_google_answers_404_for_stops_syncing_and_is_not_a_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/users/me/calendarList"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(calendar_list(&["cal-gone", "cal-ok"])))
+            .mount(&server).await;
+        Mock::given(method("GET")).and(path("/calendars/cal-gone/events"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server).await;
+        Mock::given(method("GET")).and(path("/calendars/cal-ok/events"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(one_event_body()))
+            .mount(&server).await;
+
+        let pool = omacal_store::connect_memory().await.unwrap();
+        let account = seed_account(&pool, "sub", "me@x").await;
+        seed_calendar(&pool, account, "cal-gone", 1, 1).await;
+        seed_calendar(&pool, account, "cal-ok", 1, 1).await;
+        let accounts = accounts_in_order(&pool).await;
+
+        for tick in 0..2 {
+            let (total, failed, _) = sync_accounts(
+                &pool, &accounts, &server.uri(), 0, 9_999_999_999_999,
+                |_| async { Ok("at".to_string()) },
+            )
+            .await;
+            assert!(failed.is_empty(), "tick {tick}: a deleted calendar counted as a failure: {failed:?}");
+            assert!(sync_result(total, &failed).is_ok(), "tick {tick}");
+        }
+        assert_eq!(
+            sync_state_of(&pool).await,
+            vec![("cal-gone".to_string(), 0), ("cal-ok".to_string(), 1)],
+        );
+        // `expect(1)` on the 404 mock is checked when `server` drops.
+    }
+
+    /// What must never prune: a 401 or a transport error, routine around
+    /// sleep and wake, and a 404 that nothing shows came from Google. Every
+    /// calendar stays where it was and the sync reports the failure.
+    #[tokio::test]
+    async fn a_transient_failure_prunes_nothing() {
+        struct Case { name: &'static str, list: ResponseTemplate, events: ResponseTemplate }
+        let cases = [
+            Case { name: "401 everywhere", list: ResponseTemplate::new(401),
+                   events: ResponseTemplate::new(401) },
+            Case { name: "list 401, events 404", list: ResponseTemplate::new(401),
+                   events: ResponseTemplate::new(404) },
+            Case { name: "list without a primary, events 404",
+                   list: ResponseTemplate::new(200).set_body_json(serde_json::json!({})),
+                   events: ResponseTemplate::new(404) },
+            Case { name: "list fine, events 401",
+                   list: ResponseTemplate::new(200).set_body_json(calendar_list(&["cal-1"])),
+                   events: ResponseTemplate::new(401) },
+        ];
+        for case in cases {
+            let server = MockServer::start().await;
+            Mock::given(method("GET")).and(path("/users/me/calendarList"))
+                .respond_with(case.list).mount(&server).await;
+            Mock::given(method("GET")).and(path("/calendars/cal-1/events"))
+                .respond_with(case.events).mount(&server).await;
+            let pool = omacal_store::connect_memory().await.unwrap();
+            let account = seed_account(&pool, "sub", "me@x").await;
+            seed_calendar(&pool, account, "cal-1", 1, 1).await;
+
+            let (_, failed, _) = sync_accounts(
+                &pool, &accounts_in_order(&pool).await, &server.uri(), 0, 9_999_999_999_999,
+                |_| async { Ok("at".to_string()) },
+            )
+            .await;
+            assert_eq!(failed, vec!["me@x / cal-1".to_string()], "{}", case.name);
+            assert_eq!(sync_state_of(&pool).await, vec![("cal-1".to_string(), 1)], "{}", case.name);
+        }
+
+        // Nothing listening at all: a transport error on every request.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", closed.local_addr().unwrap());
+        drop(closed);
+        let pool = omacal_store::connect_memory().await.unwrap();
+        let account = seed_account(&pool, "sub", "me@x").await;
+        seed_calendar(&pool, account, "cal-1", 1, 1).await;
+        let (_, failed, _) = sync_accounts(
+            &pool, &accounts_in_order(&pool).await, &base, 0, 9_999_999_999_999,
+            |_| async { Ok("at".to_string()) },
+        )
+        .await;
+        assert_eq!(failed, vec!["me@x / cal-1".to_string()], "transport error");
+        assert_eq!(sync_state_of(&pool).await, vec![("cal-1".to_string(), 1)], "transport error");
+    }
+
+    /// A calendar deleted or unsubscribed on Google leaves the calendar list.
+    /// A successful list without it deletes the row, whether it was synced or
+    /// already removed, and its events are never asked for.
+    #[tokio::test]
+    async fn a_calendar_missing_from_a_successful_list_is_deleted() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/users/me/calendarList"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(calendar_list(&["cal-kept"])))
+            .mount(&server).await;
+        Mock::given(method("GET")).and(path("/calendars/cal-kept/events"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(one_event_body()))
+            .mount(&server).await;
+        Mock::given(method("GET")).and(path("/calendars/cal-vanished/events"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(0)
+            .mount(&server).await;
+
+        let pool = omacal_store::connect_memory().await.unwrap();
+        let account = seed_account(&pool, "sub", "me@x").await;
+        let other = seed_account(&pool, "sub-other", "other@x").await;
+        seed_calendar(&pool, account, "cal-vanished", 0, 1).await;
+        seed_calendar(&pool, account, "cal-kept", 1, 1).await;
+        seed_calendar(&pool, account, "cal-removed-then-vanished", 1, 0).await;
+        seed_calendar(&pool, other, "cal-of-another-account", 1, 0).await;
+
+        let (total, failed, _) = sync_accounts(
+            &pool, &[(account, "me@x".to_string())], &server.uri(), 0, 9_999_999_999_999,
+            |_| async { Ok("at".to_string()) },
+        )
+        .await;
+
+        assert!(failed.is_empty(), "{failed:?}");
+        assert_eq!(total, 1, "the listed calendar still synced");
+        assert_eq!(
+            sync_state_of(&pool).await,
+            vec![("cal-kept".to_string(), 1), ("cal-of-another-account".to_string(), 0)],
+        );
     }
 
     /// What makes a removal survive the next sign-in: the calendar upsert's
