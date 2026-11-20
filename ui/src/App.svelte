@@ -923,6 +923,9 @@
    *  same SettingsModal as the menu item. */
   let settingsOpen = $state(false);
   let combineIdenticalEvents = false;
+  /** The hidden titles last seen, as one string: only a *change* to them
+   *  refetches, since the filtering itself happens in the store. */
+  let hiddenEventTitles = '';
   /** Whether the start-on-login question has been answered. `true` until the
    *  settings arrive, so the card never flashes for someone who answered. */
   let loginAsked = $state(true);
@@ -961,6 +964,7 @@
         loginAsked = s.startOnLoginAsked;
         desktop = s.desktop;
         combineIdenticalEvents = s.combineIdenticalEvents;
+        hiddenEventTitles = JSON.stringify(s.hiddenEventTitles);
         calendarGroups = s.calendarGroups;
         defaultCalendarId = s.defaultCalendarId;
         defaultEventDurationMinutes = s.defaultEventDurationMinutes;
@@ -2723,6 +2727,12 @@
     onsettingschange={(s) => {
       if (combineIdenticalEvents !== s.combineIdenticalEvents) {
         combineIdenticalEvents = s.combineIdenticalEvents;
+        void reload();
+      }
+      // `reload` also drops the prefetches, which hold the old titles' events.
+      const hidden = JSON.stringify(s.hiddenEventTitles);
+      if (hiddenEventTitles !== hidden) {
+        hiddenEventTitles = hidden;
         void reload();
       }
       calendarGroups = s.calendarGroups;
