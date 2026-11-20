@@ -937,6 +937,9 @@
   /** Whether declined meetings are drawn; the backend leaves them out of the
    *  payloads otherwise, so a change is a reload. */
   let showDeclinedEvents = false;
+  /** The hidden titles last seen, as one string: only a *change* to them
+   *  refetches, since the filtering itself happens in the store. */
+  let hiddenEventTitles = '';
   /** Whether the start-on-login question has been answered. `true` until the
    *  settings arrive, so the card never flashes for someone who answered. */
   let loginAsked = $state(true);
@@ -989,6 +992,7 @@
         followOmarchyFont(s.useOmarchyFont);
         combineIdenticalEvents = s.combineIdenticalEvents;
         showDeclinedEvents = s.showDeclinedEvents;
+        hiddenEventTitles = JSON.stringify(s.hiddenEventTitles);
         calendarGroups = s.calendarGroups;
         defaultCalendarId = s.defaultCalendarId;
         defaultEventDurationMinutes = s.defaultEventDurationMinutes;
@@ -2754,6 +2758,12 @@
       if (combineIdenticalEvents !== s.combineIdenticalEvents || showDeclinedEvents !== s.showDeclinedEvents) {
         combineIdenticalEvents = s.combineIdenticalEvents;
         showDeclinedEvents = s.showDeclinedEvents;
+        void reload();
+      }
+      // `reload` also drops the prefetches, which hold the old titles' events.
+      const hidden = JSON.stringify(s.hiddenEventTitles);
+      if (hiddenEventTitles !== hidden) {
+        hiddenEventTitles = hidden;
         void reload();
       }
       calendarGroups = s.calendarGroups;

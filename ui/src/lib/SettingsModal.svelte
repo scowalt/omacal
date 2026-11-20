@@ -572,6 +572,28 @@
     }
   }
 
+  /** The title being typed into Hidden events. */
+  let hiddenDraft = $state('');
+  /** Saves the whole hidden list; on a refusal keeps the draft and what the
+   *  backend still holds, `saveFallback`'s repair. */
+  async function saveHiddenTitles(titles: string[]): Promise<boolean> {
+    note = null;
+    try {
+      settings = await setSetting('hiddenEventTitles', titles);
+      if (settings) onsettingschange?.(settings);
+      return true;
+    } catch (e) {
+      note = { text: String(e), kind: 'error' };
+      settings = settings ? { ...settings } : null;
+      return false;
+    }
+  }
+  async function addHiddenTitle() {
+    const title = hiddenDraft.trim();
+    if (!title || !settings) return;
+    if (await saveHiddenTitles([...settings.hiddenEventTitles, title])) hiddenDraft = '';
+  }
+
   async function saveDefaultCalendar(id: number | null) {
     note = null;
     try {
@@ -2035,6 +2057,47 @@
       {:else}
         <p class="soon">No calendars yet. Connect an account first.</p>
       {/if}
+
+      <!-- Calm Calendar and its kind sync personal events in as titled
+           blocks ("(personal event)"); this hides every event of a title
+           rather than a calendar. The rule itself is the store's. -->
+      <section class="appearance-section" aria-labelledby="hidden-events-heading">
+        <h2 id="hidden-events-heading">Hidden events</h2>
+        <div class="fallback" role="group" aria-label="Hidden events">
+          {#each settings?.hiddenEventTitles ?? [] as title, i}
+            <div class="frow">
+              <span>{title}</span>
+              <button
+                type="button"
+                class="unremind"
+                aria-label={`Show events titled ${title}`}
+                disabled={!settings}
+                onclick={() => settings && saveHiddenTitles(settings.hiddenEventTitles.filter((_, j) => j !== i))}
+              >×</button>
+            </div>
+          {/each}
+          <form
+            class="frow"
+            onsubmit={(e) => {
+              e.preventDefault();
+              void addHiddenTitle();
+            }}
+          >
+            <input
+              type="text"
+              placeholder="(personal event)"
+              aria-label="Event title to hide"
+              bind:value={hiddenDraft}
+              disabled={!settings}
+            />
+            <button type="submit" class="remind" disabled={!settings || !hiddenDraft.trim()}>Hide</button>
+          </form>
+        </div>
+        <p class="hint">
+          Events with exactly this title, ignoring case, are hidden everywhere:
+          the calendar, search, the bar and reminders.
+        </p>
+      </section>
 
     {:else if pane === 'Accounts'}
       <ul class="accounts">

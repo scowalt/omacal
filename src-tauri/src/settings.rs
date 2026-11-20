@@ -854,6 +854,10 @@ pub struct AppSettings {
     /// out in the UI, so toggling a calendar by hand can never leave a stale
     /// "active" mark behind. Empty for installs without the row.
     pub calendar_groups: Vec<CalendarGroup>,
+    /// Titles of events to hide everywhere, as the user typed them (the rule,
+    /// and why it is applied in the store, is `omacal_store::events`).
+    /// Empty for installs without the row.
+    pub hidden_event_titles: Vec<String>,
 }
 
 /// A named, saved choice of which calendars are **shown** — the `selected`
@@ -913,6 +917,19 @@ fn validate_calendar_groups(groups: &[CalendarGroup]) -> Result<Vec<CalendarGrou
         out.push(CalendarGroup { name: name.to_string(), calendar_ids: ids });
     }
     Ok(out)
+}
+
+/// Trims each title, drops blanks, and drops a repeat of one already kept
+/// (same fold the store matches by), keeping the first spelling. A repeat
+/// would only add a second row to remove for the same effect.
+fn normalise_hidden_titles(titles: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    titles
+        .iter()
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty() && seen.insert(omacal_core::fold(t)))
+        .map(String::from)
+        .collect()
 }
 
 pub(crate) async fn read(pool: &SqlitePool, key: &str) -> Option<String> {
@@ -1028,6 +1045,7 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         combine_identical_events: combine_identical_events(pool).await,
         show_declined_events: show_declined_events(pool).await,
         calendar_groups: calendar_groups(pool).await,
+        hidden_event_titles: omacal_store::hidden_titles(pool).await,
         // The mark unless the row says otherwise, for `list_mode`'s reason:
         // a hand-edited value must land on what the app has always drawn.
         show_date: read(pool, SHOW_DATE_KEY).await.map(|v| v == "1").unwrap_or(false),
@@ -1813,6 +1831,9 @@ pub enum Setting {
     /// (add, rename, reorder, delete, "update to current"), and one value is
     /// one decision, never a half-applied edit.
     CalendarGroups(Vec<CalendarGroup>),
+    /// Also leaves the bar and tray showing no such event, so it rebuilds
+    /// them at once. Never refused: a blank is dropped, a repeat is folded in.
+    HiddenEventTitles(Vec<String>),
     /// Also leaves "Last view" mode, in the same write — `WeekStart`'s shape.
     DefaultView(DefaultView),
     /// The Tasks pane's within-group order. View-only, so it needs no reboot
@@ -1844,6 +1865,7 @@ impl Setting {
                 | Setting::VisibleHours { .. }
                 | Setting::CombineIdenticalEvents(_)
                 | Setting::ShowDeclinedEvents(_)
+                | Setting::HiddenEventTitles(_)
         )
     }
 }
@@ -2123,6 +2145,11 @@ pub(crate) async fn store(pool: &SqlitePool, setting: &Setting) -> Result<(), Se
             let json = serde_json::to_string(&groups).map_err(|e| SetError::Failed(e.into()))?;
             write(pool, CALENDAR_GROUPS_KEY, &json).await?;
         }
+        S::HiddenEventTitles(titles) => {
+            let titles = normalise_hidden_titles(titles);
+            let json = serde_json::to_string(&titles).map_err(|e| SetError::Failed(e.into()))?;
+            write(pool, omacal_store::HIDDEN_TITLES_KEY, &json).await?;
+        }
         S::DefaultView(view) => {
             write_all(pool, &[(DEFAULT_VIEW_KEY, view.as_str()), (DEFAULT_VIEW_FOLLOWS_LAST_KEY, "0")])
                 .await?;
@@ -2229,6 +2256,10 @@ mod tests {
         assert!(matches!(read(json!({"key": "showWeekNumbers", "value": true})), Setting::ShowWeekNumbers(true)));
         assert!(matches!(read(json!({"key": "keepRemindersOnScreen", "value": true})), Setting::KeepRemindersOnScreen(true)));
         assert!(matches!(read(json!({"key": "hideWeekends", "value": true})), Setting::HideWeekends(true)));
+        assert!(matches!(
+            read(json!({"key": "hiddenEventTitles", "value": ["(personal event)"]})),
+            Setting::HiddenEventTitles(ref t) if t == &["(personal event)"]
+        ));
         assert!(matches!(
             read(json!({"key": "calendarGroups", "value": [{"name": "Work", "calendarIds": [1, 2]}]})),
             Setting::CalendarGroups(ref g) if g == &[CalendarGroup { name: "Work".into(), calendar_ids: vec![1, 2] }]
@@ -3561,6 +3592,28 @@ mod tests {
         assert_eq!(read_settings(&p).await.calendar_groups, s.calendar_groups, "a refusal stores nothing");
         write(&p, CALENDAR_GROUPS_KEY, "not json").await.unwrap();
         assert!(read_settings(&p).await.calendar_groups.is_empty());
+    }
+
+    /// The list is stored trimmed, without blanks and without a repeat by the
+    /// store's own fold, in the order typed and with the first spelling kept;
+    /// `[]` is stored as itself, and a hand-edited row reads as nothing hidden.
+    #[tokio::test]
+    async fn hidden_event_titles_are_stored_normalised_and_read_back() {
+        let p = pool().await;
+        assert!(read_settings(&p).await.hidden_event_titles.is_empty(), "a fresh install hides nothing");
+        let typed = ["  (Personal Event) ", "", "   ", "Café", "(personal event)", "cafe", "Focus"];
+        let s = set(&p, Setting::HiddenEventTitles(typed.map(String::from).to_vec())).await.unwrap();
+        assert_eq!(s.hidden_event_titles, vec!["(Personal Event)", "Café", "Focus"]);
+        assert_eq!(read_settings(&p).await.hidden_event_titles, s.hidden_event_titles);
+        assert_eq!(
+            read(&p, omacal_store::HIDDEN_TITLES_KEY).await.as_deref(),
+            Some(r#"["(Personal Event)","Café","Focus"]"#)
+        );
+
+        let s = set(&p, Setting::HiddenEventTitles(vec![])).await.unwrap();
+        assert!(s.hidden_event_titles.is_empty());
+        write(&p, omacal_store::HIDDEN_TITLES_KEY, "not json").await.unwrap();
+        assert!(read_settings(&p).await.hidden_event_titles.is_empty());
     }
 
     /// The hour height round-trips, and a stored value the gesture could
