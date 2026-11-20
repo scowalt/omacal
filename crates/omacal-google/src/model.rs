@@ -14,6 +14,10 @@ pub struct Calendar {
     pub access_role: String,
     #[serde(default)]
     pub primary: bool,
+    /// Hidden from the list in Google Calendar's own sidebar. Still the
+    /// user's calendar; only sign-in skips these.
+    #[serde(default)]
+    pub hidden: bool,
     /// What this calendar fires for an event that says `useDefault: true`.
     ///
     /// Arrives on every `calendarList` entry already — that call carries no

@@ -7,6 +7,11 @@ pub enum ApiError {
     /// and perform a full resync (spec §5).
     #[error("sync token is no longer valid")]
     SyncTokenInvalid,
+    /// HTTP 404 from a calendar's own endpoint: Google has no such calendar
+    /// for this account. It was deleted, unsubscribed or unshared, and asking
+    /// again will not bring it back.
+    #[error("calendar not found: 404 Not Found")]
+    CalendarNotFound,
     #[error("http error: {0}")]
     Http(String),
     #[error("transport error: {0}")]
@@ -42,9 +47,11 @@ struct EventsResponse {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CalendarListResponse {
     #[serde(default)]
     items: Vec<model::Calendar>,
+    next_page_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -86,17 +93,38 @@ impl CalendarClient {
         }
     }
 
+    /// Every entry on the account's calendar list, all pages of it, hidden
+    /// entries included.
+    ///
+    /// Complete on purpose: sync treats a calendar missing from this list as
+    /// gone and deletes it, so a list cut off at Google's 100-entry page, or
+    /// one leaving out a calendar the user merely hid in Google's sidebar,
+    /// would delete calendars that still exist. Callers that want only the
+    /// visible entries filter on [`model::Calendar::hidden`].
     pub async fn list_calendars(&self) -> anyhow::Result<Vec<model::Calendar>> {
-        let resp = self
-            .http
-            .get(format!("{}/users/me/calendarList", self.base_url))
-            .bearer_auth(&self.access_token)
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<CalendarListResponse>()
-            .await?;
-        Ok(resp.items)
+        let mut calendars = Vec::new();
+        let mut page_token: Option<String> = None;
+        loop {
+            let mut params = vec![("showHidden", "true".to_string()), ("maxResults", "250".to_string())];
+            if let Some(t) = &page_token {
+                params.push(("pageToken", t.clone()));
+            }
+            let resp = self
+                .http
+                .get(format!("{}/users/me/calendarList", self.base_url))
+                .bearer_auth(&self.access_token)
+                .query(&params)
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<CalendarListResponse>()
+                .await?;
+            calendars.extend(resp.items);
+            match resp.next_page_token {
+                Some(t) => page_token = Some(t),
+                None => return Ok(calendars),
+            }
+        }
     }
 
     pub async fn calendar_title(&self, id: &str) -> anyhow::Result<String> {
@@ -153,6 +181,9 @@ impl CalendarClient {
 
         if resp.status() == reqwest::StatusCode::GONE {
             return Err(ApiError::SyncTokenInvalid);
+        }
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(ApiError::CalendarNotFound);
         }
         if !resp.status().is_success() {
             return Err(ApiError::Http(format!("{}", resp.status())));
@@ -516,6 +547,33 @@ mod tests {
         assert_eq!(cals[0].id, "primary");
         assert_eq!(cals[0].time_zone.as_deref(), Some("Europe/Sofia"));
         assert!(cals[0].primary);
+    }
+
+    /// Sync deletes any calendar this list leaves out, so it must be the
+    /// whole list: every page, and the entries hidden in Google's sidebar.
+    #[tokio::test]
+    async fn list_calendars_returns_every_page_and_hidden_entries() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/users/me/calendarList"))
+            .and(query_param("showHidden", "true"))
+            .and(query_param("pageToken", "p2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": [{"id": "hidden-one", "summary": "H", "hidden": true}]
+            })))
+            .mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/users/me/calendarList"))
+            .and(query_param("showHidden", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": [{"id": "me@x", "summary": "Me", "primary": true}],
+                "nextPageToken": "p2"
+            })))
+            .mount(&server).await;
+
+        let cals = CalendarClient::new(server.uri(), "at-1").list_calendars().await.unwrap();
+        let ids: Vec<(&str, bool)> = cals.iter().map(|c| (c.id.as_str(), c.hidden)).collect();
+        assert_eq!(ids, vec![("me@x", false), ("hidden-one", true)]);
     }
 
     #[tokio::test]
