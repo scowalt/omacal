@@ -173,7 +173,7 @@ jobs:
           case "$team" in
             "" | "not set") echo "the app carries no Team ID" >&2; exit 1 ;;
           esac
-          codesign -dv "$app" 2>&1 | grep -q '^Authority=Developer ID Application: ' || {
+          codesign -dvv "$app" 2>&1 | grep -q '^Authority=Developer ID Application: ' || {
             echo "the app is not signed with a Developer ID Application certificate" >&2
             exit 1
           }
