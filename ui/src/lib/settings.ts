@@ -127,6 +127,9 @@ export type AppSettings = {
   /** The saved calendar groups, in switcher order. Which is active is derived
    *  from what is shown, never stored — see `calendargroups.ts`. */
   calendarGroups: CalendarGroup[];
+  /** Titles of events hidden everywhere, as typed. Matched whole, ignoring
+   *  case, accents and surrounding space — in the store, not here. */
+  hiddenEventTitles: string[];
   /** Pixels per hour in Day and Week — what a pinch, Ctrl+scroll or Ctrl+=/-
    *  left the grid at. Stored for `listMode`'s reason and, like it, shown by
    *  no tab: the gesture is the control. `zoom.ts` owns the range. */
@@ -359,6 +362,9 @@ export type SettingValues = {
   /** The whole list, replaced in one write; refused with a sentence for a
    *  blank, over-long or duplicate name. */
   calendarGroups: CalendarGroup[];
+  /** The whole list, replaced in one write; the backend trims each title and
+   *  drops blanks and repeats, and answers with the list it kept. */
+  hiddenEventTitles: string[];
   /** Also leaves "Last view" mode. */
   defaultView: View;
   defaultViewFollowsLast: boolean;
