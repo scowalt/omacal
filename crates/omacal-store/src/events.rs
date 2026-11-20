@@ -662,6 +662,56 @@ pub async fn known_locations(pool: &SqlitePool) -> anyhow::Result<Vec<KnownLocat
         .collect())
 }
 
+/// The `settings` row holding the titles the user hid: a JSON array of the
+/// strings as they typed them. Named here because the rule it drives is
+/// applied here; the settings modal in `src-tauri` reads and writes the same row.
+pub const HIDDEN_TITLES_KEY: &str = "hidden_event_titles";
+
+/// The raw list, as stored. Absent, unreadable or not an array of strings all
+/// read as "nothing hidden": a hand-edited row must not blank the calendar.
+pub async fn hidden_titles(pool: &SqlitePool) -> Vec<String> {
+    let stored: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = ?1")
+        .bind(HIDDEN_TITLES_KEY)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+    stored.and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default()
+}
+
+/// A title is hidden when it is, whole, one of the user's entries: case and
+/// accents folded, surrounding whitespace ignored. Not a substring match, so
+/// hiding "Busy" does not take "Busy season planning" with it. An event with
+/// no title is never hidden.
+fn is_hidden(titles: &[String], summary: Option<&str>) -> bool {
+    let Some(summary) = summary else { return false };
+    let folded = omacal_core::fold(summary.trim());
+    titles.iter().any(|t| omacal_core::fold(t.trim()) == folded)
+}
+
+/// Applies the hidden titles to a window's rows. A hidden recurrence
+/// *exception* is kept, as cancelled, rather than dropped: it is the record of
+/// a slot, and without it the visible master expands back into that slot under
+/// its own title. Every other hidden row is dropped. A visible exception of a
+/// hidden master stays — it carries a different title, so the user did not
+/// ask for it to go.
+fn hide_titles(titles: &[String], rows: Vec<StoredEvent>) -> Vec<StoredEvent> {
+    if titles.is_empty() {
+        return rows;
+    }
+    rows.into_iter()
+        .filter_map(|mut ev| {
+            if !is_hidden(titles, ev.summary.as_deref()) {
+                return Some(ev);
+            }
+            ev.recurring_event_id.is_some().then(|| {
+                ev.status = "cancelled".into();
+                ev
+            })
+        })
+        .collect()
+}
+
 pub async fn search_events(pool: &SqlitePool, query: &str) -> anyhow::Result<Vec<StoredEvent>> {
     // Fold the query exactly as `fold_ci` folds the column, so `usa` finds
     // `ușă`, and lowercase is not a separate concern. The wildcards are escaped
@@ -688,7 +738,14 @@ pub async fn search_events(pool: &SqlitePool, query: &str) -> anyhow::Result<Vec
     );
 
     let rows = sqlx::query(&sql).bind(pattern).fetch_all(pool).await?;
-    Ok(rows.iter().map(row_to_event).collect())
+    // Dropped outright, exceptions included: a hit is a row the user would
+    // click, and there is no master expanding around it to keep suppressed.
+    let titles = hidden_titles(pool).await;
+    Ok(rows
+        .iter()
+        .map(row_to_event)
+        .filter(|ev| !is_hidden(&titles, ev.summary.as_deref()))
+        .collect())
 }
 
 pub async fn events_in_window(
@@ -710,7 +767,7 @@ pub async fn events_in_window(
          ORDER BY e.start_utc"
     );
     let rows = sqlx::query(&sql).bind(from_ms).bind(to_ms).fetch_all(pool).await?;
-    Ok(rows.iter().map(row_to_event).collect())
+    Ok(hide_titles(&hidden_titles(pool).await, rows.iter().map(row_to_event).collect()))
 }
 
 #[cfg(test)]
@@ -1095,6 +1152,178 @@ mod tests {
         upsert_event(&pool, &ev(cal, "a", 1000, 2000)).await.unwrap();
         sqlx::query("UPDATE calendars SET selected = 0").execute(&pool).await.unwrap();
         assert!(events_in_window(&pool, 0, 5000).await.unwrap().is_empty());
+    }
+
+    async fn hide(pool: &SqlitePool, stored: &str) {
+        sqlx::query("INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)")
+            .bind(HIDDEN_TITLES_KEY)
+            .bind(stored)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    fn titled(cal: i64, gid: &str, title: &str) -> StoredEvent {
+        let mut e = ev(cal, gid, 1000, 2000);
+        e.summary = Some(title.into());
+        e
+    }
+
+    async fn window_titles(pool: &SqlitePool) -> Vec<String> {
+        let mut t: Vec<String> = events_in_window(pool, 0, 5000)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.summary.unwrap_or_default())
+            .collect();
+        t.sort();
+        t
+    }
+
+    /// The reason the feature exists: Calm Calendar syncs personal events in as
+    /// `(personal event)` blocks. Whatever else is on the calendar stays.
+    #[tokio::test]
+    async fn a_hidden_title_is_excluded_and_others_are_not() {
+        let pool = connect_memory().await.unwrap();
+        let cal = seed(&pool).await;
+        upsert_event(&pool, &titled(cal, "a", "(personal event)")).await.unwrap();
+        upsert_event(&pool, &titled(cal, "b", "Standup")).await.unwrap();
+        hide(&pool, r#"["(personal event)"]"#).await;
+        assert_eq!(window_titles(&pool).await, vec!["Standup"]);
+    }
+
+    /// Matching folds case and accents and trims both sides, so what the user
+    /// typed need not be what Google stored.
+    #[tokio::test]
+    async fn matching_ignores_case_accents_and_surrounding_whitespace() {
+        let pool = connect_memory().await.unwrap();
+        let cal = seed(&pool).await;
+        upsert_event(&pool, &titled(cal, "a", "  Café Block ")).await.unwrap();
+        upsert_event(&pool, &titled(cal, "b", "FOCUS")).await.unwrap();
+        hide(&pool, r#"[" cafe block", "focus  "]"#).await;
+        assert!(window_titles(&pool).await.is_empty());
+    }
+
+    /// Whole title, not substring: hiding "Busy" must not take "Busy season
+    /// planning" with it.
+    #[tokio::test]
+    async fn a_title_that_merely_contains_the_hidden_text_still_shows() {
+        let pool = connect_memory().await.unwrap();
+        let cal = seed(&pool).await;
+        upsert_event(&pool, &titled(cal, "a", "Busy season planning")).await.unwrap();
+        upsert_event(&pool, &titled(cal, "b", "Busy")).await.unwrap();
+        hide(&pool, r#"["busy"]"#).await;
+        assert_eq!(window_titles(&pool).await, vec!["Busy season planning"]);
+    }
+
+    /// A blank entry folds to the empty string; an untitled event must not be
+    /// swept up by it, nor by any other entry.
+    #[tokio::test]
+    async fn an_untitled_event_is_never_hidden() {
+        let pool = connect_memory().await.unwrap();
+        let cal = seed(&pool).await;
+        let mut untitled = ev(cal, "a", 1000, 2000);
+        untitled.summary = None;
+        upsert_event(&pool, &untitled).await.unwrap();
+        hide(&pool, r#"["", "(no title)"]"#).await;
+        assert_eq!(events_in_window(&pool, 0, 5000).await.unwrap().len(), 1);
+    }
+
+    /// The series is expanded by the caller from its master, so the master has
+    /// to go, or every occurrence comes back.
+    #[tokio::test]
+    async fn a_hidden_master_is_excluded() {
+        let pool = connect_memory().await.unwrap();
+        let cal = seed(&pool).await;
+        let mut master = titled(cal, "m", "(personal event)");
+        master.recurrence = Some("RRULE:FREQ=DAILY".into());
+        upsert_event(&pool, &master).await.unwrap();
+        hide(&pool, r#"["(personal event)"]"#).await;
+        assert!(events_in_window(&pool, 0, 5000).await.unwrap().is_empty());
+    }
+
+    /// An exception renamed into a hidden title must not simply vanish: the
+    /// visible master would expand back into its slot under its own title. It
+    /// comes back cancelled, which suppresses the slot and draws nothing. The
+    /// converse holds too: a visible exception of a *hidden* master carries a
+    /// different title and stays.
+    #[tokio::test]
+    async fn a_hidden_exception_comes_back_cancelled_and_a_visible_one_stays() {
+        let pool = connect_memory().await.unwrap();
+        let cal = seed(&pool).await;
+        let mut master = titled(cal, "m", "Standup");
+        master.recurrence = Some("RRULE:FREQ=DAILY".into());
+        let exception = |gid: &str, master: &str, title: &str, slot: i64| {
+            let mut e = titled(cal, gid, title);
+            e.recurring_event_id = Some(master.into());
+            e.original_start_utc = Some(slot);
+            e
+        };
+        let mut hidden_master = titled(cal, "h", "(personal event)");
+        hidden_master.recurrence = Some("RRULE:FREQ=DAILY".into());
+        for row in [
+            master,
+            exception("m_renamed", "m", "(personal event)", 1000),
+            hidden_master,
+            exception("h_renamed", "h", "Dentist", 1000),
+        ] {
+            upsert_event(&pool, &row).await.unwrap();
+        }
+        hide(&pool, r#"["(personal event)"]"#).await;
+
+        let got: Vec<(String, String)> = events_in_window(&pool, 0, 5000)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.google_id, e.status))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("m".to_string(), "confirmed".to_string()),
+                ("m_renamed".to_string(), "cancelled".to_string()),
+                ("h_renamed".to_string(), "confirmed".to_string()),
+            ]
+        );
+    }
+
+    /// No row, and every unusable row, hide nothing — never everything.
+    #[tokio::test]
+    async fn an_absent_or_unreadable_row_hides_nothing() {
+        let pool = connect_memory().await.unwrap();
+        let cal = seed(&pool).await;
+        upsert_event(&pool, &titled(cal, "a", "(personal event)")).await.unwrap();
+        assert_eq!(window_titles(&pool).await, vec!["(personal event)"]);
+        assert!(hidden_titles(&pool).await.is_empty());
+        // A bare title with no JSON around it is the likeliest hand-edit, and
+        // the one a lenient reader would be tempted to accept.
+        for garbage in ["", "(personal event)", r#"{"a":1}"#, "[1,2]", "null"] {
+            hide(&pool, garbage).await;
+            assert_eq!(window_titles(&pool).await, vec!["(personal event)"], "{garbage:?}");
+        }
+    }
+
+    /// Search is a second read path with its own query, so it is its own test.
+    /// A hidden exception is dropped here rather than returned cancelled: a hit
+    /// is something to click, and no master is expanding around it.
+    #[tokio::test]
+    async fn search_excludes_hidden_titles() {
+        let pool = connect_memory().await.unwrap();
+        let cal = seed(&pool).await;
+        upsert_event(&pool, &titled(cal, "a", "(personal event)")).await.unwrap();
+        upsert_event(&pool, &titled(cal, "b", "Personal trainer")).await.unwrap();
+        let mut renamed = titled(cal, "c", "(personal event)");
+        renamed.recurring_event_id = Some("m".into());
+        renamed.original_start_utc = Some(1000);
+        upsert_event(&pool, &renamed).await.unwrap();
+        hide(&pool, r#"["(Personal Event)"]"#).await;
+        let hits: Vec<String> = search_events(&pool, "personal")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.google_id)
+            .collect();
+        assert_eq!(hits, vec!["b"]);
     }
 
     #[tokio::test]

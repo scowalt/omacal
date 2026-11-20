@@ -222,8 +222,11 @@ When showing the calendar to the user (not piping into a script):
 - Recurring events arrive already expanded: one row per occurrence in the
   window. Days with nothing simply produce no rows.
 - The CLI shows exactly what the user's app shows: hidden calendars and
-  declined events are absent. If something seems missing, `omacal
-  calendars --json` shows what is hidden.
+  declined events are absent, and so are events whose exact title the user
+  hid in Settings → Calendars → Hidden events (case ignored; a sync tool's
+  `(personal event)` blocks are the usual case). If something seems missing,
+  `omacal calendars --json` shows what is hidden; hidden titles are not
+  listed by the CLI.
 - Times are in the user's display zone; trust `start`/`end` for prose and
   `startMs`/`endMs` for arithmetic.
 - Tasks are VTODOs on an iCloud or CalDAV list, or on lists kept on this
